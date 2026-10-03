@@ -1,0 +1,76 @@
+NEPRA JURISDICTION SUMMARY
+For RAG / CrewAI complaint classification
+Last reviewed: 03 October 2026
+
+AUTHORITY
+National Electric Power Regulatory Authority (NEPRA)
+
+PRIMARY ROLE
+NEPRA is the electricity-sector regulator. Its Complaint Management System and Complaint Handling & Dispute Resolution Procedure Rules, 2015 cover consumer complaints and disputes involving electricity licensees. The Consumer Service Manual applies to consumers served by Distribution Companies (DISCOs) and Bulk Power Consumers.
+
+IMPORTANT ROUTING PRINCIPLE
+For an ordinary electricity-service problem, the consumer should normally first approach the relevant Distribution Company (for example IESCO) and the concerned SDO/XEN. NEPRA's current complaint-registration page specifically advises consumers to complain to the concerned SDO/XEN before lodging the matter with NEPRA.
+
+ROUTE TO NEPRA WHEN
+- The matter is an electricity consumer dispute involving a licensed electricity utility/DISCO
+- The consumer has already approached the relevant DISCO/SDO/XEN and the issue remains unresolved
+- The complaint concerns regulatory compliance, consumer rights or failure by the DISCO to resolve the electricity complaint
+- Billing, meter, connection or supply disputes have reached the regulatory-escalation stage
+
+COMMON KEYWORDS
+NEPRA, DISCO, electricity regulator, unresolved electricity complaint, billing dispute,
+detection bill, meter dispute, electricity connection dispute, SDO, XEN, IESCO complaint unresolved.
+
+DO NOT ROUTE DIRECTLY TO NEPRA FOR A ROUTINE FIRST-TIME IESCO SERVICE COMPLAINT
+Examples:
+- First report of local power failure
+- First complaint about low voltage
+- First complaint about defective meter
+- First request to correct a bill
+- New connection/service request
+
+These should normally go first to IESCO/relevant DISCO.
+
+ONE-YEAR PORTAL RULE
+NEPRA's current complaint-registration page states that a complaint beyond one year cannot be processed under the NEPRA Complaint Handling and Dispute Resolution Procedure Rules, 2015 through that mechanism.
+
+RECOMMENDED APP LOGIC
+1. Detect that complaint concerns electricity.
+2. Determine the relevant DISCO from city/area, if possible.
+3. Ask/check whether consumer already complained to the DISCO/SDO/XEN.
+4. If NO -> route to IESCO/relevant DISCO first.
+5. If YES and unresolved/disputed -> route/escalate to NEPRA.
+6. Record how old the issue is.
+7. If over one year, flag that NEPRA's current portal states it cannot be processed under the 2015 rules through that mechanism.
+
+MINIMUM INFORMATION TO COLLECT
+- Complainant name
+- City/address/area
+- Electricity DISCO
+- Consumer/reference number
+- Complaint description
+- Billing month / meter details where relevant
+- Date issue started
+- Whether complaint was already made to DISCO
+- Complaint/reference number from DISCO, if available
+- Result/response from DISCO
+- Supporting bills, notices, meter photos or correspondence
+
+CLASSIFICATION EXAMPLES
+"My IESCO bill is wrong and I have not complained yet." -> IESCO first, not NEPRA first
+"I complained to IESCO and the XEN but my billing dispute remains unresolved." -> NEPRA escalation
+"My meter stopped working yesterday." -> IESCO first
+"IESCO rejected my repeated complaint about an incorrect detection bill." -> NEPRA escalation
+
+OFFICIAL SOURCES
+NEPRA Complaint Management System:
+https://nepra.org.pk/CAD-Database/CMS-CAD/home.php
+
+NEPRA complaint registration:
+https://nepra.org.pk/CAD-Database/CMS-CAD/cregister.php
+
+NEPRA Legal / Rules and Manuals:
+https://nepra.org.pk/Legal.php/
+
+Revised Consumer Service Manual, as on 26 November 2025:
+https://nepra.org.pk/Legislation/7-Manuals/2025/CONSUMER%20SERVICE%20MANUAL%20%28CSM%29%20REVISED%202025.pdf

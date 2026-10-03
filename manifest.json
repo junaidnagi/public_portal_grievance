@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "dimensions": 384,
+  "chunk_tokens": 96,
+  "overlap_tokens": 16,
+  "chunk_count": 1092,
+  "created_utc": "2026-10-03T11:50:53.932436+00:00",
+  "sha256": {
+    "index.faiss": "b3f668a7c49b9b45c7f9b30c4e80130bfa2919d419947820d408e704422f8c28",
+    "chunks.json": "236b05efc1fd0d569d4a04aae15298d99c0081a96621762735f631f657b04ead"
+  }
+}

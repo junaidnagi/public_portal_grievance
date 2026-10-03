@@ -1,0 +1,8 @@
+crewai==1.15.1
+streamlit==1.65.0
+groq==0.37.1
+pypdf==6.10.0
+faiss-cpu==1.15.1
+numpy==2.3.5
+fastembed==0.7.4
+tokenizers==0.23.2

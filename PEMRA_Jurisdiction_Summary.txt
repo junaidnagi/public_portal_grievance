@@ -1,0 +1,69 @@
+PEMRA JURISDICTION SUMMARY
+For RAG / CrewAI complaint classification
+Last reviewed: 03 October 2026
+
+AUTHORITY
+Pakistan Electronic Media Regulatory Authority (PEMRA)
+
+PRIMARY ROLE
+PEMRA regulates licensed electronic media. Its Council of Complaints is a forum for complaints concerning programmes broadcast or distributed by PEMRA licensees. Under the 2023 amendment, Councils of Complaints also handle certain grievances of electronic-media employees concerning non-payment of wages, salaries and dues.
+
+ROUTE TO PEMRA WHEN THE COMPLAINT INVOLVES
+- Television programme content broadcast by a PEMRA licensee
+- Radio / FM broadcast content
+- Cable television service/content involving a PEMRA licensee
+- Programme standards and alleged Code of Conduct violations
+- Broadcast advertisements
+- Other matters involving licensed electronic-media broadcasters/distributors
+- Certain electronic-media employee complaints regarding unpaid wages, salaries or dues
+
+COMMON KEYWORDS
+PEMRA, TV channel, television, programme, broadcast, FM radio, radio station,
+cable operator, cable TV, advertisement, ad, anchor, talk show, drama, news channel,
+broadcast content, electronic media, wages of media employee.
+
+DO NOT ROUTE TO PEMRA AS THE PRIMARY AUTHORITY WHEN
+- Mobile telecom, SIM, signal, broadband telecom, DIRBS or IMEI issue -> PTA.
+- Electricity supply/billing/meter/new connection -> IESCO or relevant DISCO; NEPRA for regulatory escalation.
+- Complaint concerns ordinary internet connectivity rather than broadcast media -> usually PTA.
+
+COUNCIL OF COMPLAINTS WORKFLOW
+1. Complaint is lodged against a relevant aspect of a programme or service of a PEMRA licensee.
+2. Council of Complaints receives/reviews the complaint.
+3. Relevant parties/licensee may be heard or called for explanation according to applicable procedure.
+4. Council forms an opinion/recommendation.
+5. Recommendation goes to PEMRA for appropriate decision/order.
+
+MINIMUM INFORMATION TO COLLECT IN THE APP
+- Complainant name
+- City
+- Complaint description
+- TV/radio/cable channel or licensee name
+- Programme/advertisement name, if known
+- Date and approximate time of broadcast
+- Specific content complained of
+- Screenshot, video clip, transcript, link or other evidence, if available
+- Whether complaint concerns employee wages/salary/dues
+
+CLASSIFICATION EXAMPLES
+"A TV channel broadcast objectionable material in a talk show." -> PEMRA / Programme content
+"An FM station aired an inappropriate advertisement." -> PEMRA / Broadcast advertisement
+"My cable operator is a licensed PEMRA service and I have a service/content complaint." -> PEMRA
+"My mobile signal is weak." -> NOT PEMRA; PTA
+"My electricity meter is defective." -> NOT PEMRA; IESCO/relevant DISCO
+
+OFFICIAL SOURCES
+PEMRA Legislation:
+https://pemra.gov.pk/legislation/
+
+PEMRA Council of Complaints:
+https://www.pemra.gov.pk/coc/
+
+PEMRA Ordinance 2002:
+https://pemra.gov.pk/assets/uploads/legal/Ordinance_2002.pdf
+
+PEMRA Code of Conduct:
+https://pemra.gov.pk/assets/uploads/legal/Code_of_Conduct.pdf
+
+Current complaint helpline listed by PEMRA:
+0800-73672

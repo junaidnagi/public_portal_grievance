@@ -1,0 +1,75 @@
+{
+  "files": [
+    {
+      "source_file": "IESCO_Complaint_Routing_Summary.txt",
+      "pages_read": 1,
+      "characters": 3267,
+      "ocr_pages": 0
+    },
+    {
+      "source_file": "NEPRA_Complaint_Handling_Rules_2015.pdf",
+      "pages_read": 5,
+      "characters": 9112,
+      "ocr_pages": 5
+    },
+    {
+      "source_file": "NEPRA_Consumer_Service_Manual_2025.pdf",
+      "pages_read": 104,
+      "characters": 216522,
+      "ocr_pages": 0
+    },
+    {
+      "source_file": "NEPRA_Jurisdiction_Summary.txt",
+      "pages_read": 1,
+      "characters": 3710,
+      "ocr_pages": 0
+    },
+    {
+      "source_file": "PEMRA_Amendment_Act_2023.pdf",
+      "pages_read": 9,
+      "characters": 18426,
+      "ocr_pages": 0
+    },
+    {
+      "source_file": "PEMRA_COC_Rules_2010.pdf",
+      "pages_read": 5,
+      "characters": 9152,
+      "ocr_pages": 5
+    },
+    {
+      "source_file": "PEMRA_Code_of_Conduct_2015.pdf",
+      "pages_read": 14,
+      "characters": 22473,
+      "ocr_pages": 14
+    },
+    {
+      "source_file": "PEMRA_Jurisdiction_Summary.txt",
+      "pages_read": 1,
+      "characters": 3091,
+      "ocr_pages": 0
+    },
+    {
+      "source_file": "PEMRA_Ordinance_2002.pdf",
+      "pages_read": 31,
+      "characters": 54200,
+      "ocr_pages": 1
+    },
+    {
+      "source_file": "PTA_CMS_User_Manual.pdf",
+      "pages_read": 16,
+      "characters": 14188,
+      "ocr_pages": 0
+    },
+    {
+      "source_file": "PTA_Jurisdiction_Summary.txt",
+      "pages_read": 1,
+      "characters": 3046,
+      "ocr_pages": 0
+    }
+  ],
+  "warnings": [
+    "PEMRA_Ordinance_2002.pdf: page 2 has insufficient text; scans require OCR."
+  ],
+  "chunk_count": 1092,
+  "readable_page_count": 188
+}

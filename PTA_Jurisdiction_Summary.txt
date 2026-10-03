@@ -1,0 +1,70 @@
+PTA JURISDICTION SUMMARY
+For RAG / CrewAI complaint classification
+Last reviewed: 03 October 2026
+
+AUTHORITY
+Pakistan Telecommunication Authority (PTA)
+
+PRIMARY ROLE
+PTA regulates telecommunication services in Pakistan. Its Complaint Management System (CMS) allows telecom consumers to lodge and track complaints relating to telecommunications services.
+
+ROUTE TO PTA WHEN THE COMPLAINT INVOLVES
+- Mobile/cellular service quality
+- Weak or unavailable mobile signal / coverage
+- Mobile internet/data service
+- Telecom billing, packages, balance deductions or service charges
+- SIM-related telecom service problems
+- Fixed-line telecom service
+- Internet service provider / broadband telecom complaints
+- DIRBS / mobile device registration issues
+- IMEI-related issues
+- Stolen handset blocking or recovered handset unblocking
+- Fraudulent mobile-number activity
+- Spam, unsolicited or fraudulent telecom communications
+- Certain unlawful online-content complaints handled through PTA mechanisms
+
+COMMON KEYWORDS
+PTA, mobile network, SIM, signal, coverage, call drop, mobile data, internet provider,
+broadband, telecom bill, package, balance, IMEI, DIRBS, PTA approved phone,
+stolen mobile, block IMEI, unblock IMEI, scam call, fraudulent number, spam SMS.
+
+DO NOT ROUTE TO PTA AS THE PRIMARY AUTHORITY WHEN
+- Complaint is about electricity supply, billing, meter or connection -> IESCO / relevant DISCO, with NEPRA as regulator/escalation authority.
+- Complaint is about television/radio broadcast programming, licensed electronic-media content, or cable-TV content -> PEMRA.
+- Complaint is simply about a general consumer product with no telecom-service issue.
+
+PTA CMS WORKFLOW
+1. Consumer creates/uses PTA CMS profile.
+2. Complaint is submitted with complaint details.
+3. Complaint is routed/processed through the relevant complaint mechanism.
+4. Consumer can monitor status.
+5. Updates are provided through CMS.
+6. Consumer can provide feedback.
+
+MINIMUM INFORMATION TO COLLECT IN THE APP
+- Complainant name
+- City
+- Complaint description
+- Telecom operator/service provider, if known
+- Mobile/telephone/account number where relevant
+- Complaint category
+- Date/time of issue
+- Evidence or screenshots, if relevant
+- IMEI for handset-related complaints
+- URL/platform/screenshot for unlawful-online-content complaints, if relevant
+
+CLASSIFICATION EXAMPLES
+"My Jazz SIM has no signal in my area." -> PTA / Mobile network coverage
+"My broadband provider keeps overbilling me." -> PTA / Telecom billing-service complaint
+"My imported phone IMEI is blocked by DIRBS." -> PTA / DIRBS-IMEI
+"My phone was stolen and I want the IMEI blocked." -> PTA / Stolen handset-IMEI
+"I received a scam SMS from a mobile number." -> PTA / Fraudulent communication
+"My electricity bill is wrong." -> NOT PTA; electricity authority
+"A TV channel broadcast objectionable content." -> NOT PTA; PEMRA
+
+OFFICIAL SOURCES
+PTA Complaint Management System:
+https://complaint.pta.gov.pk/
+
+PTA CMS User Manual:
+https://complaint.pta.gov.pk/Usermanual/User_Manual_CMS_Web.pdf
