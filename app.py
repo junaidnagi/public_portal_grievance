@@ -17,12 +17,30 @@ from groq import Groq, APIConnectionError, APIStatusError, RateLimitError
 from pypdf import PdfReader
 from rag import retrieve, search_index, INDEX_DIR
 from storage import save_case, load_cases, delete_case
-from agents import intake, jurisdiction, audit as audit_module, petition, routing, tracker
 
 DEFAULT_MODEL = "openai/gpt-oss-20b"
 NOTICE = "This platform assists citizens in preparing and navigating grievances and does not constitute professional legal advice."
 UNVERIFIED = "Information could not be verified from the available regulatory knowledge base."
 CHECKLIST = ["Identity document", "Relevant bill or service evidence", "Payment receipt (if relevant)", "Previous complaint reference", "Supporting correspondence or photo"]
+
+# Keep runtime agent definitions here so uploading app.py does not depend on
+# a separate agents/ package. These are six distinct CrewAI agents.
+AGENT_SPECS = (
+    ("Intake", "Extract category, organization, problem, dated facts and unknowns. Use the supplied structured intake as a starting point."),
+    ("Jurisdiction", "Use retrieved evidence for initial authority and possible escalation. Clearly label demo guidance and mapping as unverified suggestions. Never treat demonstration text as law."),
+    ("Readiness", "Explain the supplied score only when assessed. It is a self-reported generic demo checklist, not legally mandatory document validation. Otherwise say Not assessed. Never invent document availability."),
+    ("Petition", "Write a formal English complaint with addressee, subject, facts, requested relief, confirmed available attachments, date and signature placeholder. Use placeholders for missing facts. Omit unverified laws and identity numbers."),
+    ("Routing", "Explain submission preparation and source-supported escalation, distinguishing tentative mappings from verified procedure. Nothing has been submitted. Do not invent submission URLs, offices or deadlines."),
+    ("Tracking", "Suggest reference-number and follow-up steps. User dates are personal reminders, not legal deadlines. Explain manual status updates and that nothing has been filed automatically."),
+)
+
+
+def create_crew_agent(role: str, goal: str, llm: BaseLLM, rules: str) -> Agent:
+    """Create one CrewAI agent with the shared privacy and evidence rules."""
+    return Agent(role=role, goal=goal,
+                 backstory="You assist Pakistani citizens cautiously. " + rules,
+                 llm=llm, allow_delegation=False, verbose=False, max_iter=2,
+                 max_retry_limit=0, max_execution_time=120)
 
 
 def secret(name: str, default: str = "") -> str:
@@ -136,18 +154,17 @@ def run_agents(case: dict, sources: list[dict], api_key: str, model: str) -> lis
              "Sources are user supplied and are not independently verified. Label legal findings as "
              "source-supported interpretation requiring verification. Cite source filename and page. "
              "If evidence is missing, say: " + UNVERIFIED + " Keep outputs concise.")
-    modules = [intake, jurisdiction, audit_module, petition, routing, tracker]
     agents, tasks = [], []
-    for module in modules:
-        agent = module.create_agent(llm, rules)
-        task = Task(description=rules + "\n" + module.GOAL + "\nSHARED INPUT:\n" + shared,
+    for role, goal in AGENT_SPECS:
+        agent = create_crew_agent(role, goal, llm, rules)
+        task = Task(description=rules + "\n" + goal + "\nSHARED INPUT:\n" + shared,
                     expected_output="A concise factual result for this stage.", agent=agent,
                     context=list(tasks))
         agents.append(agent)
         tasks.append(task)
     result = Crew(agents=agents, tasks=tasks, process=Process.sequential,
                   memory=False, cache=False, verbose=False, tracing=False).kickoff()
-    return [{"agent": role, "text": output.raw} for role, output in zip([m.ROLE for m in modules], result.tasks_output)]
+    return [{"agent": role, "text": output.raw} for (role, _), output in zip(AGENT_SPECS, result.tasks_output)]
 
 
 JURISDICTIONS = {
