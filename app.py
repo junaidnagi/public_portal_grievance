@@ -26,8 +26,8 @@ UNVERIFIED = "Information could not be verified from the available regulatory kn
 CHECKLIST = ["Identity document", "Relevant bill or service evidence", "Payment receipt (if relevant)", "Previous complaint reference", "Supporting correspondence or photo"]
 LOGGER = logging.getLogger("grievance.ai")
 
-# Only these fixed messages are displayed or saved. API responses, keys and
-# complaint text must never be copied into diagnostic messages or logs.
+# Only fixed messages and allowlisted numeric quota details are displayed or
+# saved. Never copy raw API responses, keys or complaint text into diagnostics.
 AI_ISSUES = {
     "GROQ_KEY_MISSING": ("The Groq API key is missing.", "In Streamlit app settings, add GROQ_API_KEY under Secrets, save, then retry."),
     "GROQ_AUTH_ERROR": ("Groq rejected the API key (401).", "Replace GROQ_API_KEY in Streamlit Secrets with an active key from your Groq account."),
@@ -43,18 +43,125 @@ AI_ISSUES = {
     "CREWAI_WORKFLOW_ERROR": ("The CrewAI workflow could not complete.", "Use Check AI connection below. If it passes, report this code and the safe diagnostic line from Manage app logs."),
 }
 
+RATE_LIMIT_LABELS = {
+    "RPM": "Requests per minute", "RPD": "Requests per day",
+    "TPM": "Tokens per minute", "TPD": "Tokens per day",
+    "ITPM": "Input tokens per minute", "OTPM": "Output tokens per minute",
+    "ASH": "Audio seconds per hour", "ASD": "Audio seconds per day",
+}
+RATE_COUNT_FIELDS = {"limit", "used", "requested", "limit_requests_day",
+                     "remaining_requests_day", "limit_tokens_minute", "remaining_tokens_minute"}
+RATE_TIME_FIELDS = {"retry_after_seconds", "reset_requests_seconds", "reset_tokens_seconds"}
+
+
+def safe_rate_limit_info(value) -> dict:
+    """Retain known category names and bounded numbers, never provider text."""
+    if not isinstance(value, dict):
+        return {}
+    clean = {}
+    kind = value.get("kind")
+    if isinstance(kind, str) and kind in RATE_LIMIT_LABELS:
+        clean["kind"] = kind
+    for field in RATE_COUNT_FIELDS | RATE_TIME_FIELDS:
+        number = value.get(field)
+        upper = 10 ** 10 if field in RATE_COUNT_FIELDS else 7 * 86400
+        if type(number) not in (int, float) or not 0 <= number <= upper or not math.isfinite(number):
+            continue
+        if field in RATE_COUNT_FIELDS and number <= 10 ** 10 and number == int(number):
+            clean[field] = int(number)
+        elif field in RATE_TIME_FIELDS and number <= 7 * 86400:
+            clean[field] = round(float(number), 3)
+    return clean
+
+
+def duration_seconds(value: str):
+    """Parse Groq's numeric Retry-After or compact reset duration headers."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    try:
+        number = float(value)
+    except ValueError:
+        if not re.fullmatch(r"(?:\d+(?:\.\d+)?(?:ms|s|m|h|d))+", value):
+            return None
+        factors = {"ms": .001, "s": 1, "m": 60, "h": 3600, "d": 86400}
+        number = sum(float(amount) * factors[unit]
+                     for amount, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|s|m|h|d)", value))
+    return number if math.isfinite(number) and 0 <= number <= 7 * 86400 else None
+
+
+def groq_rate_limit_info(error: APIStatusError) -> dict:
+    """Extract category/counters from a 429 without exposing its raw body."""
+    body = error.body
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (ValueError, TypeError):
+            body = {}
+    api_error = body.get("error", body) if isinstance(body, dict) else {}
+    message = api_error.get("message", "") if isinstance(api_error, dict) else ""
+    info = {}
+    if isinstance(message, str) and re.match(r"^(?:Rate limit reached|Request too large)\b", message.strip(), re.I):
+        # Groq's standard error says "on tokens per minute (TPM): Limit ...".
+        # A missing/unrecognized category stays unknown; headers alone are
+        # not sufficient to establish which of several quotas caused the 429.
+        for kind, label in RATE_LIMIT_LABELS.items():
+            matched = re.search(r"\bon\s+" + re.escape(label) +
+                                r"(?:\s*\(" + kind + r"\))?\s*:\s*(.*)", message, re.I)
+            if matched:
+                info["kind"] = kind
+                for field in ("limit", "used", "requested"):
+                    number = re.search(r"\b" + field + r"\s*:?\s*(\d+(?:,\d{3})*)(?!\d)",
+                                       matched.group(1), re.I)
+                    if number:
+                        digits = number.group(1).replace(",", "")
+                        if len(digits) <= 11:
+                            info[field] = int(digits)
+                break
+    headers = error.response.headers
+    for field, header in {"limit_requests_day": "x-ratelimit-limit-requests",
+                          "remaining_requests_day": "x-ratelimit-remaining-requests",
+                          "limit_tokens_minute": "x-ratelimit-limit-tokens",
+                          "remaining_tokens_minute": "x-ratelimit-remaining-tokens"}.items():
+        raw = headers.get(header, "")
+        if re.fullmatch(r"\d{1,11}", raw):
+            info[field] = int(raw)
+    for field, header in {"retry_after_seconds": "retry-after",
+                          "reset_requests_seconds": "x-ratelimit-reset-requests",
+                          "reset_tokens_seconds": "x-ratelimit-reset-tokens"}.items():
+        number = duration_seconds(headers.get(header, ""))
+        if number is not None:
+            info[field] = number
+    if "retry_after_seconds" not in info and isinstance(message, str):
+        wait = re.search(r"\bPlease try again in ([0-9.]+(?:ms|s|m|h|d)(?:[0-9.]+(?:ms|s|m|h|d))*)", message, re.I)
+        number = duration_seconds(wait.group(1)) if wait else None
+        if number is not None:
+            info["retry_after_seconds"] = number
+    return safe_rate_limit_info(info)
+
+
+def request_exceeds_allowance(info: dict) -> bool:
+    return (info.get("kind") in RATE_LIMIT_LABELS and "limit" in info and "requested" in info and
+            info["requested"] > info["limit"])
+
 
 class AIServiceError(RuntimeError):
     """A fixed, safe failure category that survives CrewAI exception wrapping."""
-    def __init__(self, code: str):
+    def __init__(self, code: str, rate_limit=None):
         self.code = code if code in AI_ISSUES else "CREWAI_WORKFLOW_ERROR"
+        self.rate_limit = safe_rate_limit_info(rate_limit) if self.code == "GROQ_RATE_LIMIT" else {}
         super().__init__(f"{self.code}: {AI_ISSUES[self.code][0]}")
 
 
-def ai_issue(code: str) -> dict:
+def ai_issue(code: str, rate_limit=None) -> dict:
     code = code if code in AI_ISSUES else "CREWAI_WORKFLOW_ERROR"
     message, action = AI_ISSUES[code]
-    return {"code": code, "message": message, "action": action}
+    issue = {"code": code, "message": message, "action": action}
+    if code == "GROQ_RATE_LIMIT":
+        info = safe_rate_limit_info(rate_limit)
+        if info:
+            issue["rate_limit"] = info
+    return issue
 
 
 def diagnose_ai_error(error: Exception) -> dict:
@@ -66,16 +173,17 @@ def diagnose_ai_error(error: Exception) -> dict:
             continue
         seen.add(id(current))
         if isinstance(current, AIServiceError):
-            return ai_issue(current.code)
+            return ai_issue(current.code, current.rate_limit)
         if isinstance(current, RateLimitError):
-            return ai_issue("GROQ_RATE_LIMIT")
+            return ai_issue("GROQ_RATE_LIMIT", groq_rate_limit_info(current))
         if isinstance(current, APIConnectionError):
             return ai_issue("GROQ_CONNECTION_ERROR")
         if isinstance(current, APIStatusError):
             status_codes = {401: "GROQ_AUTH_ERROR", 403: "GROQ_ACCESS_ERROR", 404: "GROQ_MODEL_ERROR",
                             413: "GROQ_INPUT_TOO_LARGE", 429: "GROQ_RATE_LIMIT", 400: "GROQ_REQUEST_ERROR",
                             422: "GROQ_REQUEST_ERROR"}
-            return ai_issue(status_codes.get(current.status_code, "GROQ_SERVICE_ERROR"))
+            return ai_issue(status_codes.get(current.status_code, "GROQ_SERVICE_ERROR"),
+                            groq_rate_limit_info(current) if current.status_code == 429 else None)
         for nested in (current.__context__, current.__cause__):
             if isinstance(nested, Exception):
                 pending.append(nested)
@@ -83,9 +191,34 @@ def diagnose_ai_error(error: Exception) -> dict:
 
 
 def show_ai_issue(issue: dict) -> None:
-    safe = ai_issue(issue.get("code", "CREWAI_WORKFLOW_ERROR"))
+    safe = ai_issue(issue.get("code", "CREWAI_WORKFLOW_ERROR"), issue.get("rate_limit"))
     st.warning(safe["message"] + " " + safe["action"])
     st.caption("AI diagnostic code: " + safe["code"])
+    if safe["code"] == "GROQ_RATE_LIMIT":
+        info = safe.get("rate_limit", {})
+        kind = info.get("kind")
+        if kind:
+            st.caption("Groq reported limit: " + RATE_LIMIT_LABELS[kind] + " (" + kind + ")")
+        else:
+            st.caption("The exact limit category was not supplied or was not recognized. Check Groq Limits and Usage.")
+        rows = [{"Detail": label, "Value": info[field]} for field, label in (
+            ("limit", "Allowance"), ("used", "Already used"), ("requested", "This request needed"),
+            ("retry_after_seconds", "Retry wait reported at failure (seconds)")) if field in info]
+        if rows:
+            st.table(rows)
+        if request_exceeds_allowance(info):
+            st.warning("This request alone exceeds the reported allowance. Reduce the prompt/output budget or use an account/model with enough quota; waiting alone will not resolve it.")
+        counters = [{"Detail": label, "Value": info[field]} for field, label in (
+            ("limit_requests_day", "Requests per day: allowance"),
+            ("remaining_requests_day", "Requests per day: remaining"),
+            ("reset_requests_seconds", "Requests per day: reset wait (seconds)"),
+            ("limit_tokens_minute", "Tokens per minute: allowance"),
+            ("remaining_tokens_minute", "Tokens per minute: remaining"),
+            ("reset_tokens_seconds", "Tokens per minute: reset wait (seconds)")) if field in info]
+        if counters:
+            with st.expander("Other quota counters returned by Groq"):
+                st.table(counters)
+        st.caption("These numbers describe the failed request. They are not a live view of your account usage.")
 
 # Keep runtime agent definitions here so uploading app.py does not depend on
 # a separate agents/ package. These are six distinct CrewAI agents.
@@ -158,10 +291,11 @@ class GroqLLM(BaseLLM):
         self.max_completion_tokens = max_completion_tokens
         self.max_attempts = max(1, min(3, max_attempts))
         self.last_issue = None
+        self.last_rate_limit = {}
 
     def failure(self, code: str) -> AIServiceError:
         self.last_issue = code
-        return AIServiceError(code)
+        return AIServiceError(code, self.last_rate_limit)
 
     def supports_function_calling(self) -> bool:
         return False
@@ -208,8 +342,12 @@ class GroqLLM(BaseLLM):
                 if not isinstance(content, str) or not content.strip():
                     raise self.failure("GROQ_EMPTY_RESPONSE")
                 self.last_issue = None
+                self.last_rate_limit = {}
                 return content
             except RateLimitError as exc:
+                self.last_rate_limit = groq_rate_limit_info(exc)
+                if request_exceeds_allowance(self.last_rate_limit) or self.last_rate_limit.get("kind") in ("RPD", "TPD"):
+                    raise self.failure("GROQ_RATE_LIMIT") from None
                 if attempt == self.max_attempts - 1:
                     raise self.failure("GROQ_RATE_LIMIT") from None
                 header = exc.response.headers.get("retry-after", "")
@@ -228,6 +366,8 @@ class GroqLLM(BaseLLM):
                 time.sleep(2 ** attempt)
             except APIStatusError as exc:
                 status = exc.status_code
+                if status == 429:
+                    self.last_rate_limit = groq_rate_limit_info(exc)
                 if status >= 500 and attempt < self.max_attempts - 1:
                     time.sleep(2 ** attempt)
                     continue
@@ -279,7 +419,7 @@ def run_agents(case: dict, sources: list[dict], api_key: str, model: str) -> lis
         # CrewAI may replace the original exception. Retain the provider's safe
         # category on this adapter so the result still explains an API failure.
         if llm.last_issue:
-            raise AIServiceError(llm.last_issue) from None
+            raise llm.failure(llm.last_issue) from None
         raise
     if len(result.tasks_output) != len(AGENT_SPECS) or any(not (output.raw or "").strip() for output in result.tasks_output):
         raise AIServiceError("CREWAI_WORKFLOW_ERROR")
