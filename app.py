@@ -36,7 +36,7 @@ AI_ISSUES = {
     "GROQ_RATE_LIMIT": ("Groq's request or token limit was reached (429).", "Wait before retrying. Check the reset time and limits in your Groq account; avoid repeated clicks."),
     "GROQ_CONNECTION_ERROR": ("The app could not connect to Groq or the request timed out.", "Try again later. If it persists, check Groq service availability and your deployment's connectivity."),
     "GROQ_INPUT_TOO_LARGE": ("Groq rejected a request that was too large (413).", "Shorten the complaint and retry. If a short complaint also fails, report this code to the app maintainer."),
-    "GROQ_REQUEST_ERROR": ("Groq rejected the request (400 or 422).", "Check the configured model and use a shorter complaint. If it persists, report this code to the app maintainer."),
+    "GROQ_REQUEST_ERROR": ("Groq rejected the request (400 or 422).", "Run Check AI connection. If it succeeds, deploy the latest app.py and report this code if complaint analysis still fails."),
     "GROQ_SERVICE_ERROR": ("Groq returned a service error.", "Try again later. Check your Groq account/service status if the error continues."),
     "GROQ_EMPTY_RESPONSE": ("Groq returned no usable answer.", "Try again with a shorter complaint. Report this code if the model repeatedly returns an empty answer."),
     "AI_CALL_BUDGET": ("The agent workflow reached its request limit.", "Shorten the complaint and retry once. Report this code if it repeats."),
@@ -172,9 +172,27 @@ class GroqLLM(BaseLLM):
     def get_context_window_size(self) -> int:
         return 32768  # Conservative budget for this MVP.
 
-    def call(self, messages, tools=None, callbacks=None, available_functions=None, **kwargs) -> str:
+    def prepare_messages(self, messages) -> list[dict[str, str]]:
+        """Copy text messages into Groq's schema without CrewAI metadata."""
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
+        if not isinstance(messages, list) or not messages:
+            raise self.failure("CREWAI_WORKFLOW_ERROR")
+        clean = []
+        for message in messages:
+            if not isinstance(message, dict):
+                raise self.failure("CREWAI_WORKFLOW_ERROR")
+            role, content = message.get("role"), message.get("content")
+            if role not in ("system", "user", "assistant") or not isinstance(content, str):
+                raise self.failure("CREWAI_WORKFLOW_ERROR")
+            # CrewAI 1.15.1 marks prompts with cache_breakpoint. Groq rejects
+            # that internal field (and messages[].name). Send only the text
+            # schema used by this app; leave CrewAI's original dicts intact.
+            clean.append({"role": role, "content": content})
+        return clean
+
+    def call(self, messages, tools=None, callbacks=None, available_functions=None, **kwargs) -> str:
+        messages = self.prepare_messages(messages)
         for attempt in range(self.max_attempts):
             if self.calls >= 18:
                 raise self.failure("AI_CALL_BUDGET")
