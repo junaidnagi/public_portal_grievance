@@ -8,6 +8,8 @@ import re
 import time
 import uuid
 import copy
+import logging
+import math
 from datetime import date
 from typing import Any
 
@@ -22,6 +24,68 @@ DEFAULT_MODEL = "openai/gpt-oss-20b"
 NOTICE = "This platform assists citizens in preparing and navigating grievances and does not constitute professional legal advice."
 UNVERIFIED = "Information could not be verified from the available regulatory knowledge base."
 CHECKLIST = ["Identity document", "Relevant bill or service evidence", "Payment receipt (if relevant)", "Previous complaint reference", "Supporting correspondence or photo"]
+LOGGER = logging.getLogger("grievance.ai")
+
+# Only these fixed messages are displayed or saved. API responses, keys and
+# complaint text must never be copied into diagnostic messages or logs.
+AI_ISSUES = {
+    "GROQ_KEY_MISSING": ("The Groq API key is missing.", "In Streamlit app settings, add GROQ_API_KEY under Secrets, save, then retry."),
+    "GROQ_AUTH_ERROR": ("Groq rejected the API key (401).", "Replace GROQ_API_KEY in Streamlit Secrets with an active key from your Groq account."),
+    "GROQ_ACCESS_ERROR": ("Groq denied access to the model (403).", "Check your Groq organization/project model permissions and the account associated with the key."),
+    "GROQ_MODEL_ERROR": ("The configured model was not found or is unavailable.", "Set GROQ_MODEL to openai/gpt-oss-20b in Streamlit Secrets, then check AI connection again."),
+    "GROQ_RATE_LIMIT": ("Groq's request or token limit was reached (429).", "Wait before retrying. Check the reset time and limits in your Groq account; avoid repeated clicks."),
+    "GROQ_CONNECTION_ERROR": ("The app could not connect to Groq or the request timed out.", "Try again later. If it persists, check Groq service availability and your deployment's connectivity."),
+    "GROQ_INPUT_TOO_LARGE": ("Groq rejected a request that was too large (413).", "Shorten the complaint and retry. If a short complaint also fails, report this code to the app maintainer."),
+    "GROQ_REQUEST_ERROR": ("Groq rejected the request (400 or 422).", "Check the configured model and use a shorter complaint. If it persists, report this code to the app maintainer."),
+    "GROQ_SERVICE_ERROR": ("Groq returned a service error.", "Try again later. Check your Groq account/service status if the error continues."),
+    "GROQ_EMPTY_RESPONSE": ("Groq returned no usable answer.", "Try again with a shorter complaint. Report this code if the model repeatedly returns an empty answer."),
+    "AI_CALL_BUDGET": ("The agent workflow reached its request limit.", "Shorten the complaint and retry once. Report this code if it repeats."),
+    "CREWAI_WORKFLOW_ERROR": ("The CrewAI workflow could not complete.", "Use Check AI connection below. If it passes, report this code and the safe diagnostic line from Manage app logs."),
+}
+
+
+class AIServiceError(RuntimeError):
+    """A fixed, safe failure category that survives CrewAI exception wrapping."""
+    def __init__(self, code: str):
+        self.code = code if code in AI_ISSUES else "CREWAI_WORKFLOW_ERROR"
+        super().__init__(f"{self.code}: {AI_ISSUES[self.code][0]}")
+
+
+def ai_issue(code: str) -> dict:
+    code = code if code in AI_ISSUES else "CREWAI_WORKFLOW_ERROR"
+    message, action = AI_ISSUES[code]
+    return {"code": code, "message": message, "action": action}
+
+
+def diagnose_ai_error(error: Exception) -> dict:
+    """Inspect typed exceptions, including wrapped causes, never their raw text."""
+    pending, seen = [error], set()
+    while pending and len(seen) < 20:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, AIServiceError):
+            return ai_issue(current.code)
+        if isinstance(current, RateLimitError):
+            return ai_issue("GROQ_RATE_LIMIT")
+        if isinstance(current, APIConnectionError):
+            return ai_issue("GROQ_CONNECTION_ERROR")
+        if isinstance(current, APIStatusError):
+            status_codes = {401: "GROQ_AUTH_ERROR", 403: "GROQ_ACCESS_ERROR", 404: "GROQ_MODEL_ERROR",
+                            413: "GROQ_INPUT_TOO_LARGE", 429: "GROQ_RATE_LIMIT", 400: "GROQ_REQUEST_ERROR",
+                            422: "GROQ_REQUEST_ERROR"}
+            return ai_issue(status_codes.get(current.status_code, "GROQ_SERVICE_ERROR"))
+        for nested in (current.__context__, current.__cause__):
+            if isinstance(nested, Exception):
+                pending.append(nested)
+    return ai_issue("CREWAI_WORKFLOW_ERROR")
+
+
+def show_ai_issue(issue: dict) -> None:
+    safe = ai_issue(issue.get("code", "CREWAI_WORKFLOW_ERROR"))
+    st.warning(safe["message"] + " " + safe["action"])
+    st.caption("AI diagnostic code: " + safe["code"])
 
 # Keep runtime agent definitions here so uploading app.py does not depend on
 # a separate agents/ package. These are six distinct CrewAI agents.
@@ -84,10 +148,20 @@ def readiness(available: list[str]) -> dict:
 
 class GroqLLM(BaseLLM):
     """Direct Groq SDK adapter: bounded retries and sanitized errors."""
-    def __init__(self, api_key: str, model: str):
+    def __init__(self, api_key: str, model: str, max_completion_tokens: int = 3000, max_attempts: int = 3):
+        model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        # The direct SDK takes the model ID, not LiteLLM's provider prefix.
+        model = model.removeprefix("groq/")
         super().__init__(model=model, temperature=0.2)
         self.client = Groq(api_key=api_key, timeout=45, max_retries=0)
         self.calls = 0
+        self.max_completion_tokens = max_completion_tokens
+        self.max_attempts = max(1, min(3, max_attempts))
+        self.last_issue = None
+
+    def failure(self, code: str) -> AIServiceError:
+        self.last_issue = code
+        return AIServiceError(code)
 
     def supports_function_calling(self) -> bool:
         return False
@@ -101,46 +175,64 @@ class GroqLLM(BaseLLM):
     def call(self, messages, tools=None, callbacks=None, available_functions=None, **kwargs) -> str:
         if isinstance(messages, str):
             messages = [{"role": "user", "content": messages}]
-        self.calls += 1
-        if self.calls > 18:
-            raise RuntimeError("Agent call budget reached. Shorten the complaint and try again.")
-        for attempt in range(3):
+        for attempt in range(self.max_attempts):
+            if self.calls >= 18:
+                raise self.failure("AI_CALL_BUDGET")
+            self.calls += 1  # Count retries as API requests too.
             try:
                 extra = {'reasoning_effort': 'low'} if 'gpt-oss' in self.model else {}
                 response = self.client.chat.completions.create(
                     model=self.model, messages=messages, temperature=0.2,
-                    max_completion_tokens=3000, **extra)
+                    max_completion_tokens=self.max_completion_tokens, **extra)
+                if not response.choices:
+                    raise self.failure("GROQ_EMPTY_RESPONSE")
                 content = response.choices[0].message.content
-                if not content or not content.strip():
-                    raise RuntimeError("Groq returned an empty response. Please try again.")
+                if not isinstance(content, str) or not content.strip():
+                    raise self.failure("GROQ_EMPTY_RESPONSE")
+                self.last_issue = None
                 return content
             except RateLimitError as exc:
-                if attempt == 2:
-                    raise RuntimeError("Groq rate limit reached. Wait a minute and try again.") from None
+                if attempt == self.max_attempts - 1:
+                    raise self.failure("GROQ_RATE_LIMIT") from None
                 header = exc.response.headers.get("retry-after", "")
                 try:
                     wait = float(header)
                 except (ValueError, TypeError):
                     wait = 2 ** (attempt + 1)
+                if not math.isfinite(wait):
+                    wait = 2 ** (attempt + 1)
                 if wait > 15:
-                    raise RuntimeError("Groq requests a longer wait. Please try again later.") from None
+                    raise self.failure("GROQ_RATE_LIMIT") from None
                 time.sleep(max(1, wait))
             except APIConnectionError:
-                if attempt == 2:
-                    raise RuntimeError("Groq connection timed out. Check connectivity and try again.") from None
+                if attempt == self.max_attempts - 1:
+                    raise self.failure("GROQ_CONNECTION_ERROR") from None
                 time.sleep(2 ** attempt)
             except APIStatusError as exc:
                 status = exc.status_code
-                if status >= 500 and attempt < 2:
+                if status >= 500 and attempt < self.max_attempts - 1:
                     time.sleep(2 ** attempt)
                     continue
-                message = {401: "Groq API key is invalid. Update Streamlit secrets.",
-                           403: "Groq denied access. Check model permissions in your Groq account.",
-                           404: "Model unavailable. Update GROQ_MODEL in Streamlit secrets.",
-                           400: "Groq rejected the request. Check the model and shorten the input."}.get(status,
-                           "Groq service error. Try again later.")
-                raise RuntimeError(message) from None
-        raise RuntimeError("Groq could not complete the request.")
+                body = exc.body if isinstance(exc.body, dict) else {}
+                api_error = body.get("error", body)
+                if isinstance(api_error, dict) and api_error.get("code") == "model_not_found":
+                    issue = ai_issue("GROQ_MODEL_ERROR")
+                else:
+                    issue = diagnose_ai_error(exc)
+                raise self.failure(issue["code"]) from None
+        raise self.failure("GROQ_SERVICE_ERROR")
+
+
+def check_ai_connection(api_key: str, model: str) -> dict:
+    """One short synthetic inference request; no complaint data is sent."""
+    if not api_key:
+        return {"ok": False, **ai_issue("GROQ_KEY_MISSING")}
+    try:
+        llm = GroqLLM(api_key, model, max_completion_tokens=512, max_attempts=1)
+        llm.call("Reply with exactly OK. This is a connection test.")
+        return {"ok": True}
+    except Exception as error:
+        return {"ok": False, **diagnose_ai_error(error)}
 
 
 def run_agents(case: dict, sources: list[dict], api_key: str, model: str) -> list[dict]:
@@ -162,8 +254,17 @@ def run_agents(case: dict, sources: list[dict], api_key: str, model: str) -> lis
                     context=list(tasks))
         agents.append(agent)
         tasks.append(task)
-    result = Crew(agents=agents, tasks=tasks, process=Process.sequential,
-                  memory=False, cache=False, verbose=False, tracing=False).kickoff()
+    try:
+        result = Crew(agents=agents, tasks=tasks, process=Process.sequential,
+                      memory=False, cache=False, verbose=False, tracing=False).kickoff()
+    except Exception:
+        # CrewAI may replace the original exception. Retain the provider's safe
+        # category on this adapter so the result still explains an API failure.
+        if llm.last_issue:
+            raise AIServiceError(llm.last_issue) from None
+        raise
+    if len(result.tasks_output) != len(AGENT_SPECS) or any(not (output.raw or "").strip() for output in result.tasks_output):
+        raise AIServiceError("CREWAI_WORKFLOW_ERROR")
     return [{"agent": role, "text": output.raw} for (role, _), output in zip(AGENT_SPECS, result.tasks_output)]
 
 
@@ -288,6 +389,19 @@ def main() -> None:
         st.caption('Copy this fictional example into New Complaint. Demo mode produces deterministic outputs without running CrewAI or Groq.')
     elif page == 'New Complaint':
         st.subheader('Enter your complaint')
+        with st.expander('AI connection check'):
+            st.caption('Check AI connection sends a short test message to Groq using the saved key. Your complaint is not included.')
+            if st.button('Check AI connection'):
+                with st.spinner('Checking AI connection…'):
+                    st.session_state['ai_connection_result'] = check_ai_connection(
+                        secret('GROQ_API_KEY'), secret('GROQ_MODEL', DEFAULT_MODEL))
+            connection = st.session_state.get('ai_connection_result')
+            if connection is not None:
+                if connection.get('ok'):
+                    st.success('Groq accepted the saved key and model and returned a test answer.')
+                    st.caption('This checks a short AI request. A full complaint can still encounter token limits or a CrewAI workflow error.')
+                else:
+                    show_ai_issue(connection)
         with st.expander('Optional voice input — English or Urdu'):
             audio = st.audio_input('Record your complaint')
             st.caption('Clicking Transcribe recording sends audio to Groq. Review the transcript before analyzing. Voice requires a Groq key and is not simulated in demo mode.')
@@ -332,16 +446,16 @@ def main() -> None:
                 case['mode'] = 'Demo / template' if demo_mode or not key else 'CrewAI / Groq'
                 if demo_mode or not key:
                     if not key and not demo_mode:
-                        st.warning('GROQ_API_KEY is missing. Showing a local template demo; no CrewAI or Groq call was made.')
+                        case['ai_issue'] = ai_issue('GROQ_KEY_MISSING')
                     case['outputs'] = demo_outputs(case, sources)
                 else:
                     try:
                         with st.spinner('Running six CrewAI agents…'):
                             case['outputs'] = run_agents(case, sources, key, secret('GROQ_MODEL', DEFAULT_MODEL))
                     except Exception as error:
-                        if isinstance(error, RuntimeError) and str(error).startswith(('Groq', 'Model unavailable', 'Agent call budget')):
-                            st.warning(str(error))
-                        st.warning('Groq or the agent workflow could not finish. A local template draft is shown instead. Check the key, model or rate limit and try again later.')
+                        case['ai_issue'] = diagnose_ai_error(error)
+                        LOGGER.warning('AI analysis failed: code=%s exception=%s',
+                                       case['ai_issue']['code'], type(error).__name__)
                         case['mode'] = 'Fallback template — AI run unsuccessful'
                         case['outputs'] = demo_outputs(case, sources)
                 st.session_state.cases[case['id']] = case
@@ -450,11 +564,11 @@ def main() -> None:
             st.bar_chart({'Resolved': resolved, 'Unresolved': len(cases)-resolved})
         st.caption('Only aggregate counts for your cases appear; no names or document numbers are published.')
     else:
-        st.write('Live mode uses six real sequential CrewAI agents in agents/. Each module has one responsibility. Shared dictionaries and previous task results connect them. Demo/fallback mode uses deterministic Python outputs and is clearly labeled.')
+        st.write('Live mode uses six real sequential CrewAI agents defined in app.py. The optional agents/ folder contains reference copies. Shared dictionaries and previous task results connect the agents. Demo/fallback mode uses deterministic Python outputs and is clearly labeled.')
         st.write('Keys come from Streamlit secrets. SQLite saves are isolated by a hashed private recovery key. The database is local to the deployment and can disappear on Streamlit Community Cloud restarts. Download case backups. No user accounts are provided.')
         st.write('Sources and mappings require verification. AI output is an interpretation, not a legal determination. Readiness is a self-reported checklist, not official eligibility.')
         st.subheader('Future Improvements')
-        st.write('OCR, PDF letter export, verified statutory deadlines, reminders, automatic submission, WhatsApp, maps, durable authenticated storage and advanced orchestration.')
+        st.write('PDF letter export, verified statutory deadlines, reminders, automatic submission, WhatsApp, maps, durable authenticated storage and advanced orchestration. Optional OCR is already available during offline source ingestion.')
 
 
 def persist(case: dict) -> None:
@@ -472,6 +586,11 @@ def show_current_case() -> None:
     case = st.session_state.cases[current]
     st.subheader('Results: ' + current)
     st.caption('Mode: ' + case['mode'] + '. Review facts and jurisdiction before filing.')
+    if case.get('ai_issue'):
+        show_ai_issue(case['ai_issue'])
+        st.caption('The draft below uses a local template. After fixing the issue, click Analyze Complaint again to request AI analysis.')
+    elif case['mode'].startswith('Fallback template'):
+        st.warning('This earlier draft did not retain the AI failure details. Open AI connection check, then analyze the complaint again to get a diagnostic code.')
     st.write(f"Category: {case['category']} · City: {case['city']} · Status: {case['status']}")
     st.warning('Authority information should be verified against official regulatory sources before submission.')
     score = case['audit']['score']
