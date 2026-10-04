@@ -25,6 +25,9 @@ For sending email, configure RESEND_API_KEY plus SUBMISSION_FROM, or SMTP_HOST,
 SMTP_PORT, SMTP_SECURITY, SMTP_USERNAME, SMTP_PASSWORD and SMTP_FROM.
 Sending requires review/authorization. Official portal login/CAPTCHA remains
 on the official site. Groq organization/project permissions still apply.
+Successful Groq model requests are remembered for the same API key in the
+private local database. Retries default to an untried model; a generic access
+denial is kept distinct from a documented model-specific permission refusal.
 Without an app sender, choose Send using my email app; download an unsent
 .eml message with the selected attachments, or open your email/webmail draft.
 Webmail links require attaching evidence yourself and clicking Send there.
@@ -670,6 +673,119 @@ def render_personal_email(case: dict, selected: list[str], include_identity: boo
             st.rerun()
         except ValueError as error:
             st.warning(str(error))
+
+# ---------------- Groq recovery and last successful model ----------------
+GROQ_SAFE_PROVIDER_CODES = {
+    'model_permission_blocked_org', 'model_permission_blocked_project',
+    'model_not_found', 'model_decommissioned', 'access_denied', 'permission_denied',
+    'ip_not_allowed', 'account_suspended', 'organization_restricted', 'project_restricted',
+}
+
+def safe_groq_provider_details(value) -> dict:
+    if not isinstance(value, dict): return {}
+    allowed = {'provider_code': GROQ_SAFE_PROVIDER_CODES | {'unspecified'},
+        'access_scope': {'organization_model','project_model','general_access'},
+        'response_format': {'json','html','text','absent'}}
+    return {key: item for key, item in value.items() if key in allowed and isinstance(item, str) and item in allowed[key]}
+
+
+def groq_provider_details(error) -> dict:
+    """Read typed/JSON/string SDK errors, retaining only fixed safe categories."""
+    body = getattr(error, 'body', None)
+    response_format = 'json' if isinstance(body, dict) else 'absent'
+    if isinstance(body, (str, bytes)):
+        if isinstance(body, bytes): body = body.decode('utf-8', errors='replace')
+        response_format = 'html' if re.match(r'\s*<(?:!doctype|html)', body, re.I) else 'text'
+        try:
+            body = json.loads(body[:262144])
+            response_format = 'json'
+        except (ValueError, TypeError):
+            body = None
+    if not isinstance(body, dict):
+        response = getattr(error, 'response', None)
+        try:
+            body = response.json()
+            if isinstance(body, dict): response_format = 'json'
+        except (AttributeError, ValueError, TypeError):
+            body = {}
+    item = body.get('error', body) if isinstance(body, dict) else {}
+    if not isinstance(item, dict): item = {}
+    code = str(item.get('code') or getattr(error, 'code', '') or '').strip().lower()
+    # Also recognize Groq's documented model-permission message when a client
+    # preserves its type/message but omits the code. Do not rotate on a generic 403.
+    if not code and item.get('type') == 'permissions_error':
+        message = item.get('message', '')
+        match = re.search(r'\bmodel\b.{0,150}\bblocked at (?:the )?(organization|project) level\b',
+            message, re.I) if isinstance(message, str) else None
+        if match:
+            code = 'model_permission_blocked_' + ('org' if match[1].lower() == 'organization' else 'project')
+    code = code if code in GROQ_SAFE_PROVIDER_CODES else 'unspecified'
+    scope = {'model_permission_blocked_org':'organization_model',
+        'model_permission_blocked_project':'project_model'}.get(code, 'general_access')
+    return {'provider_code':code, 'access_scope':scope, 'response_format':response_format}
+
+
+def groq_key_digest(api_key: str) -> str:
+    return hashlib.sha256(('grievance-groq-model-v1:' + api_key).encode()).hexdigest() if api_key else ''
+
+
+def working_groq_model(api_key: str) -> str:
+    """Private cache is scoped to this exact key; never infer success from a draft."""
+    digest = groq_key_digest(api_key)
+    if not digest: return ''
+    try:
+        with feature_database() as db:
+            row = db.execute('SELECT model FROM groq_working_models WHERE key_digest=?', (digest,)).fetchone()
+        model = row[0] if row else ''
+        return model if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]{1,100}', model) else ''
+    except (sqlite3.Error, OSError):
+        return ''
+
+
+def remember_working_groq_model(digest: str, model: str) -> None:
+    if not re.fullmatch(r'[0-9a-f]{64}', digest) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]{1,100}', model):
+        return
+    try:
+        with feature_database() as db:
+            row = db.execute('SELECT model FROM groq_working_models WHERE key_digest=?', (digest,)).fetchone()
+            if not row or row[0] != model:
+                db.execute('INSERT OR REPLACE INTO groq_working_models VALUES (?,?,?)',
+                    (digest, model, datetime.now(timezone.utc).isoformat()))
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def forget_working_groq_model(digest: str, model: str) -> None:
+    try:
+        with feature_database() as db:
+            db.execute('DELETE FROM groq_working_models WHERE key_digest=? AND model=?', (digest, model))
+    except (sqlite3.Error, OSError):
+        pass
+
+
+def configured_groq_model() -> str:
+    model = secret('GROQ_MODEL', DEFAULT_MODEL).removeprefix('groq/') or DEFAULT_MODEL
+    return model if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]{1,100}', model) else DEFAULT_MODEL
+
+
+def preferred_groq_model(api_key: str) -> str:
+    return working_groq_model(api_key) or configured_groq_model()
+
+
+def groq_retry_choices(case: dict, api_key: str) -> tuple[list[str], str]:
+    working = working_groq_model(api_key)
+    choices = list(dict.fromkeys(([working] if working else []) +
+        [configured_groq_model()] + list(GROQ_TEXT_MODELS) + groq_fallback_models('')))
+    tried = set(case.get('ai_models_tried', []))
+    default = working if working and working not in tried else next((model for model in choices if model not in tried), choices[0])
+    return choices, default
+
+
+def acknowledge_local_draft(case: dict) -> None:
+    """Proceed with the actual template without calling it successful AI output."""
+    case['ai_issue_acknowledged_at'] = datetime.now(timezone.utc).isoformat()
+    case['mode'] = ('Local template — AI unavailable' if 'template' in case.get('mode', '').lower()
+        else 'Prepared complaint — last AI retry unavailable')
 
 DEFAULT_MODEL = "openai/gpt-oss-20b"
 GROQ_TEXT_MODELS = (DEFAULT_MODEL, 'openai/gpt-oss-120b')
@@ -2206,7 +2322,7 @@ def send_complaint(case: dict, selected: list[str], include_identity: bool, cons
 AI_ISSUES = {
     "GROQ_KEY_MISSING": ("The Groq API key is missing.", "In Streamlit app settings, add GROQ_API_KEY under Secrets, save, then retry."),
     "GROQ_AUTH_ERROR": ("Groq rejected the API key (401).", "Replace GROQ_API_KEY in Streamlit Secrets with an active key from your Groq account."),
-    "GROQ_ACCESS_ERROR": ("Groq denied this request (403).", "Enable the chosen model in the Groq organization and project Limits settings, or retry with a model your project permits. Your existing case and letter remain available."),
+    "GROQ_ACCESS_ERROR": ("Groq denied this request (403).", "Your case and letter remain available. Retry another permitted model; if access is still denied, check Groq account/access controls. A model restriction must be changed in both the organization and project settings."),
     "GROQ_MODEL_ERROR": ("The configured model was not found or is unavailable.", "Set GROQ_MODEL to an available model in Streamlit Secrets, then retry complaint analysis."),
     "GROQ_RATE_LIMIT": ("Groq's request or token limit was reached (429).", "Wait before retrying. Check the reset time and limits in your Groq account; avoid repeated clicks."),
     "GROQ_CONNECTION_ERROR": ("The app could not connect to Groq or the request timed out.", "Try again later. If it persists, check Groq service availability and your deployment's connectivity."),
@@ -2322,7 +2438,8 @@ def request_exceeds_allowance(info: dict) -> bool:
 
 class AIServiceError(RuntimeError):
     """A fixed, safe failure category that survives CrewAI exception wrapping."""
-    def __init__(self, code: str, rate_limit=None):
+    def __init__(self, code: str, rate_limit=None, provider_details=None):
+        self.provider_details = safe_groq_provider_details(provider_details)
         self.code = code if code in AI_ISSUES else "CREWAI_WORKFLOW_ERROR"
         self.rate_limit = safe_rate_limit_info(rate_limit) if self.code == "GROQ_RATE_LIMIT" else {}
         super().__init__(f"{self.code}: {AI_ISSUES[self.code][0]}")
@@ -2348,7 +2465,9 @@ def diagnose_ai_error(error: Exception) -> dict:
             continue
         seen.add(id(current))
         if isinstance(current, AIServiceError):
-            return ai_issue(current.code, current.rate_limit)
+            issue = ai_issue(current.code, current.rate_limit)
+            if current.provider_details: issue['provider_details'] = current.provider_details
+            return issue
         if isinstance(current, RateLimitError):
             return ai_issue("GROQ_RATE_LIMIT", groq_rate_limit_info(current))
         if isinstance(current, APIConnectionError):
@@ -2357,8 +2476,10 @@ def diagnose_ai_error(error: Exception) -> dict:
             status_codes = {401: "GROQ_AUTH_ERROR", 403: "GROQ_ACCESS_ERROR", 404: "GROQ_MODEL_ERROR",
                             413: "GROQ_INPUT_TOO_LARGE", 429: "GROQ_RATE_LIMIT", 400: "GROQ_REQUEST_ERROR",
                             422: "GROQ_REQUEST_ERROR"}
-            return ai_issue(status_codes.get(current.status_code, "GROQ_SERVICE_ERROR"),
+            issue = ai_issue(status_codes.get(current.status_code, "GROQ_SERVICE_ERROR"),
                             groq_rate_limit_info(current) if current.status_code == 429 else None)
+            if current.status_code == 403: issue['provider_details'] = groq_provider_details(current)
+            return issue
         for nested in (current.__context__, current.__cause__):
             if isinstance(nested, Exception):
                 pending.append(nested)
@@ -2369,6 +2490,13 @@ def show_ai_issue(issue: dict) -> None:
     safe = ai_issue(issue.get("code", "CREWAI_WORKFLOW_ERROR"), issue.get("rate_limit"))
     st.warning(safe["message"] + " " + safe["action"])
     st.caption("AI diagnostic code: " + safe["code"])
+    details = safe_groq_provider_details(issue.get('provider_details'))
+    if safe['code'] == 'GROQ_ACCESS_ERROR' and details:
+        if details.get('access_scope') in ('organization_model', 'project_model'):
+            st.caption('Groq identified a model restriction at the ' + ('organization' if details['access_scope'] == 'organization_model' else 'project') + ' level.')
+        else:
+            st.caption('Groq did not identify a model-specific restriction. Check account/access controls and hosting network access if another model is also denied.')
+        st.caption('Provider category: ' + details.get('provider_code', 'unspecified') + ' · response: ' + details.get('response_format', 'absent'))
     if safe["code"] == "GROQ_RATE_LIMIT":
         info = safe.get("rate_limit", {})
         kind = info.get("kind")
@@ -2503,6 +2631,7 @@ def retry_case_ai(case: dict, api_key: str, model: str, keep_letter: bool = True
     case['outputs'] = outputs
     case['mode'] = AI_LIVE_MODE
     case.pop('ai_issue', None)
+    case.pop('ai_issue_acknowledged_at', None)
     case['last_ai_retry'] = datetime.now(timezone.utc).isoformat()
 
 
@@ -2510,11 +2639,24 @@ def render_ai_recovery(case: dict) -> None:
     with st.expander('Fix AI access and retry this complaint', expanded=case.get('ai_issue', {}).get('code') in ('GROQ_ACCESS_ERROR', 'GROQ_MODEL_ERROR')):
         st.caption('Retry reuses this case ID, particulars and evidence. It runs complaint analysis; no complaint is submitted.')
         if case.get('ai_models_tried'): st.write('Models attempted:', ', '.join(case['ai_models_tried']))
-        choices = list(dict.fromkeys([secret('GROQ_MODEL', DEFAULT_MODEL).removeprefix('groq/')] + list(GROQ_TEXT_MODELS) + groq_fallback_models('')))
-        model = st.selectbox('Model for retry', choices, key=case['id'] + '_retry_model')
+        choices, default = groq_retry_choices(case, secret('GROQ_API_KEY'))
+        choice_key = case['id'] + '_retry_model'
+        signature = json.dumps([case.get('ai_models_tried', []), case.get('ai_issue', {}).get('code', ''), default])
+        if st.session_state.get(choice_key + '_signature') != signature:
+            st.session_state[choice_key] = default
+            st.session_state[choice_key + '_signature'] = signature
+        model = st.selectbox('Model for retry', choices, key=choice_key)
+        if not groq_fallback_models(case.get('ai_model_requested', DEFAULT_MODEL)):
+            st.caption('Automatic model fallback is disabled in this deployment. You can still select another model for this explicit retry.')
         st.caption('The model must be enabled for the Groq organization and project used by your API key. Model selection does not change provider permissions.')
         st.link_button('Groq organization model permissions', 'https://console.groq.com/settings/limits')
         st.link_button('Groq project model permissions', 'https://console.groq.com/settings/project/limits')
+        st.caption('After a successful request, this app remembers the model for the same API key so new complaints do not revert to a previously rejected default. Local hosting storage must remain available.')
+        if st.button('Continue with the prepared local complaint', key=case['id'] + '_use_local'):
+            acknowledge_local_draft(case)
+            persist(case)
+            navigate_to('Document preparation')
+            st.rerun()
         keep = st.checkbox('Keep my current complaint letter when retrying AI', value=True, key=case['id'] + '_keep_retry_letter')
         if st.button('Retry AI analysis for this complaint', key=case['id'] + '_retry_ai', disabled=st.session_state.get('demo_mode', False)):
             key = secret('GROQ_API_KEY')
@@ -2527,6 +2669,7 @@ def render_ai_recovery(case: dict) -> None:
                     if not keep: st.session_state.pop(case['id'] + 'petition', None)
                 except Exception as error:
                     case['ai_issue'] = diagnose_ai_error(error)
+                    case.pop('ai_issue_acknowledged_at', None)
                     LOGGER.warning('AI retry failed: code=%s exception=%s', case['ai_issue']['code'], type(error).__name__)
                 persist(case); st.rerun()
 
@@ -2539,6 +2682,8 @@ class GroqLLM(BaseLLM):
         model = model.removeprefix("groq/")
         super().__init__(model=model, temperature=0.2)
         self.client = Groq(api_key=api_key, timeout=45, max_retries=0)
+        self.model_cache_digest = groq_key_digest(api_key)
+        self.last_provider_details = {}
         self.calls = 0
         self.requests = 0
         self.quota_headers = {}
@@ -2565,7 +2710,7 @@ class GroqLLM(BaseLLM):
 
     def failure(self, code: str) -> AIServiceError:
         self.last_issue = code
-        return AIServiceError(code, self.last_rate_limit)
+        return AIServiceError(code, self.last_rate_limit, self.last_provider_details)
 
     def supports_function_calling(self) -> bool:
         return False
@@ -2663,6 +2808,8 @@ class GroqLLM(BaseLLM):
                     raise self.failure("GROQ_EMPTY_RESPONSE")
                 self.last_issue = None
                 self.last_rate_limit = {}
+                self.last_provider_details = {}
+                remember_working_groq_model(self.model_cache_digest, self.model)
                 return content
             except RateLimitError as exc:
                 self.last_rate_limit = groq_rate_limit_info(exc)
@@ -2688,9 +2835,10 @@ class GroqLLM(BaseLLM):
                 attempt += 1
             except APIStatusError as exc:
                 status = exc.status_code
-                body = exc.body if isinstance(exc.body, dict) else {}
-                api_error = body.get('error', body)
-                provider_code = str(api_error.get('code', '')) if isinstance(api_error, dict) else ''
+                self.last_provider_details = groq_provider_details(exc)
+                provider_code = self.last_provider_details['provider_code']
+                if status in (403, 404, 410):
+                    forget_working_groq_model(self.model_cache_digest, self.model)
                 # Change only a rejected model, never bypass an organization,
                 # project, authentication, IP, spending or rate-limit control.
                 model_rejected = status == 403 and provider_code in GROQ_MODEL_PERMISSION_CODES
@@ -2703,7 +2851,7 @@ class GroqLLM(BaseLLM):
                     time.sleep(2 ** attempt)
                     attempt += 1
                     continue
-                if isinstance(api_error, dict) and api_error.get("code") == "model_not_found":
+                if provider_code in ('model_not_found', 'model_decommissioned'):
                     issue = ai_issue("GROQ_MODEL_ERROR")
                 else:
                     issue = diagnose_ai_error(exc)
@@ -2785,6 +2933,10 @@ def run_agents(case: dict, sources: list[dict], api_key: str, model: str) -> lis
         case['ai_model_used'] = llm.model
         case['ai_models_tried'] = list(llm.models_tried)
         case['ai_model_switches'] = copy.deepcopy(llm.model_switches)
+        if llm.last_provider_details:
+            case['ai_provider_details'] = copy.deepcopy(llm.last_provider_details)
+        else:
+            case.pop('ai_provider_details', None)
     if len(result.tasks_output) != len(AGENT_SPECS) or any(not (output.raw or "").strip() for output in result.tasks_output):
         raise AIServiceError("CREWAI_WORKFLOW_ERROR")
     outputs = [{"agent": role, "text": output.raw} for (role, _), output in zip(AGENT_SPECS, result.tasks_output)]
@@ -3461,6 +3613,7 @@ def feature_database():
     db = sqlite3.connect(path, timeout=10)
     db.execute('PRAGMA journal_mode=WAL'); db.execute('PRAGMA busy_timeout=10000')
     db.execute('CREATE TABLE IF NOT EXISTS feature_settings (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
+    db.execute('CREATE TABLE IF NOT EXISTS groq_working_models (key_digest TEXT PRIMARY KEY, model TEXT NOT NULL, updated_at TEXT NOT NULL)')
     db.execute('CREATE TABLE IF NOT EXISTS escalation_jobs (owner TEXT NOT NULL, case_id TEXT NOT NULL, payload TEXT NOT NULL, signature TEXT NOT NULL, state TEXT NOT NULL, result TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(owner,case_id))')
     db.execute('CREATE TABLE IF NOT EXISTS public_grievances (case_key TEXT PRIMARY KEY, owner TEXT NOT NULL, city TEXT NOT NULL, category TEXT NOT NULL, status TEXT NOT NULL, day TEXT NOT NULL)')
     db.commit()
@@ -4106,7 +4259,7 @@ def main() -> None:
                 else:
                     try:
                         with st.spinner('Running six AI stages… Your local draft and case ID are already available.'):
-                            case['outputs'] = run_agents(case, sources, key, secret('GROQ_MODEL', DEFAULT_MODEL))
+                            case['outputs'] = run_agents(case, sources, key, preferred_groq_model(key))
                     except Exception as error:
                         case['ai_issue'] = diagnose_ai_error(error)
                         LOGGER.warning('AI analysis failed: code=%s exception=%s',
@@ -4630,8 +4783,11 @@ def show_current_case() -> None:
     st.caption('The PG case ID is your internal workspace reference. Official company references are recorded separately.')
     st.caption('Mode: ' + case['mode'] + '. Review facts and jurisdiction before filing.')
     if case.get('ai_issue'):
-        show_ai_issue(case['ai_issue'])
-        st.caption('Your case and letter are retained. Choose a permitted model or correct the Groq settings, then retry this complaint below.')
+        if case.get('ai_issue_acknowledged_at'):
+            st.info('Your prepared complaint is retained. AI was unavailable on the last attempt; review the draft and evidence before filing.')
+        else:
+            show_ai_issue(case['ai_issue'])
+            st.caption('Your case and letter are retained. Retry AI with another permitted model, or continue with the prepared local complaint below.')
         render_ai_recovery(case)
     elif case['mode'].startswith('Fallback template'):
         st.warning('This earlier draft did not retain the AI failure details. Retry this complaint below for current analysis and a diagnostic if it fails.')
