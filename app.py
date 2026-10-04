@@ -38,6 +38,8 @@ from rag import retrieve, search_index, INDEX_DIR
 from storage import save_case, load_cases, delete_case
 
 DEFAULT_MODEL = "openai/gpt-oss-20b"
+GROQ_TEXT_MODELS = (DEFAULT_MODEL, 'openai/gpt-oss-120b')
+GROQ_MODEL_PERMISSION_CODES = {'model_permission_blocked_org', 'model_permission_blocked_project'}
 NOTICE = "This platform assists citizens in preparing and navigating grievances and does not constitute professional legal advice."
 UNVERIFIED = "Information could not be verified from the available regulatory knowledge base."
 CHECKLIST = ["Identity document", "Relevant bill or service evidence", "Payment receipt (if relevant)", "Previous complaint reference", "Supporting correspondence or photo"]
@@ -1560,7 +1562,7 @@ def send_complaint(case: dict, selected: list[str], include_identity: bool, cons
 AI_ISSUES = {
     "GROQ_KEY_MISSING": ("The Groq API key is missing.", "In Streamlit app settings, add GROQ_API_KEY under Secrets, save, then retry."),
     "GROQ_AUTH_ERROR": ("Groq rejected the API key (401).", "Replace GROQ_API_KEY in Streamlit Secrets with an active key from your Groq account."),
-    "GROQ_ACCESS_ERROR": ("Groq denied access to the model (403).", "Check your Groq organization/project model permissions and the account associated with the key."),
+    "GROQ_ACCESS_ERROR": ("Groq denied this request (403).", "Enable the chosen model in the Groq organization and project Limits settings, or retry with a model your project permits. Your existing case and letter remain available."),
     "GROQ_MODEL_ERROR": ("The configured model was not found or is unavailable.", "Set GROQ_MODEL to an available model in Streamlit Secrets, then retry complaint analysis."),
     "GROQ_RATE_LIMIT": ("Groq's request or token limit was reached (429).", "Wait before retrying. Check the reset time and limits in your Groq account; avoid repeated clicks."),
     "GROQ_CONNECTION_ERROR": ("The app could not connect to Groq or the request timed out.", "Try again later. If it persists, check Groq service availability and your deployment's connectivity."),
@@ -1823,6 +1825,66 @@ def readiness(available: list[str]) -> dict:
             "available": available, "missing": [x for x in CHECKLIST if x not in available]}
 
 
+def groq_fallback_models(current: str) -> list[str]:
+    """Bounded text-model alternatives on the same provider; never quota rotation."""
+    try:
+        configured = st.secrets.get('GROQ_FALLBACK_MODELS', list(GROQ_TEXT_MODELS))
+    except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
+        configured = list(GROQ_TEXT_MODELS)
+    if isinstance(configured, str): configured = configured.split(',')
+    if not isinstance(configured, (list, tuple)): configured = []
+    result = []
+    for value in configured:
+        value = str(value).strip().removeprefix('groq/')
+        if value != current and value not in result and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_./-]{1,100}', value):
+            result.append(value)
+    return result[:2]
+
+
+def retry_case_ai(case: dict, api_key: str, model: str, keep_letter: bool = True) -> None:
+    if st.session_state.get('demo_mode', False):
+        raise ValueError('Switch off Demo mode to retry live AI analysis.')
+    if not api_key:
+        raise ValueError('Add an active GROQ_API_KEY in Streamlit Secrets before retrying.')
+    previous_letter = case['outputs'][3]['text']
+    previous_origin = case.get('letter_origin', 'Existing complaint letter')
+    outputs = run_agents(case, case.get('sources', []), api_key, model)
+    if keep_letter:
+        outputs[3]['text'] = previous_letter
+        case['letter_origin'] = previous_origin
+    else:
+        case['letter_needs_review'] = True
+    case['outputs'] = outputs
+    case['mode'] = 'CrewAI / Groq'
+    case.pop('ai_issue', None)
+    case['last_ai_retry'] = datetime.now(timezone.utc).isoformat()
+
+
+def render_ai_recovery(case: dict) -> None:
+    with st.expander('Fix AI access and retry this complaint', expanded=case.get('ai_issue', {}).get('code') in ('GROQ_ACCESS_ERROR', 'GROQ_MODEL_ERROR')):
+        st.caption('Retry reuses this case ID, particulars and evidence. It runs complaint analysis; no complaint is submitted.')
+        if case.get('ai_models_tried'): st.write('Models attempted:', ', '.join(case['ai_models_tried']))
+        choices = list(dict.fromkeys([secret('GROQ_MODEL', DEFAULT_MODEL).removeprefix('groq/')] + list(GROQ_TEXT_MODELS) + groq_fallback_models('')))
+        model = st.selectbox('Model for retry', choices, key=case['id'] + '_retry_model')
+        st.caption('The model must be enabled for the Groq organization and project used by your API key. Model selection does not change provider permissions.')
+        st.link_button('Groq organization model permissions', 'https://console.groq.com/settings/limits')
+        st.link_button('Groq project model permissions', 'https://console.groq.com/settings/project/limits')
+        keep = st.checkbox('Keep my current complaint letter when retrying AI', value=True, key=case['id'] + '_keep_retry_letter')
+        if st.button('Retry AI analysis for this complaint', key=case['id'] + '_retry_ai', disabled=st.session_state.get('demo_mode', False)):
+            key = secret('GROQ_API_KEY')
+            if not key:
+                st.warning('Add GROQ_API_KEY in Streamlit Secrets, save and reboot the app. Your draft remains available.')
+            else:
+                try:
+                    with st.spinner('Retrying AI analysis for your existing complaint…'):
+                        retry_case_ai(case, key, model, keep)
+                    if not keep: st.session_state.pop(case['id'] + 'petition', None)
+                except Exception as error:
+                    case['ai_issue'] = diagnose_ai_error(error)
+                    LOGGER.warning('AI retry failed: code=%s exception=%s', case['ai_issue']['code'], type(error).__name__)
+                persist(case); st.rerun()
+
+
 class GroqLLM(BaseLLM):
     """Direct Groq SDK adapter: bounded retries and sanitized errors."""
     def __init__(self, api_key: str, model: str, max_completion_tokens: int = 2000, max_attempts: int = 3):
@@ -1840,6 +1902,20 @@ class GroqLLM(BaseLLM):
         self.max_attempts = max(1, min(3, max_attempts))
         self.last_issue = None
         self.last_rate_limit = {}
+        self.models_tried = [model]
+        self.model_switches = []
+        self.fallback_models = groq_fallback_models(model)
+
+    def switch_model(self, reason: str) -> bool:
+        candidate = next((value for value in self.fallback_models if value not in self.models_tried), None)
+        if not candidate:
+            return False
+        previous = self.model
+        self.model = candidate
+        self.models_tried.append(candidate)
+        self.model_switches.append({'from': previous, 'to': candidate, 'reason': reason})
+        self.quota_headers = {}; self.last_rate_limit = {}
+        return True
 
     def failure(self, code: str) -> AIServiceError:
         self.last_issue = code
@@ -1966,14 +2042,21 @@ class GroqLLM(BaseLLM):
                 attempt += 1
             except APIStatusError as exc:
                 status = exc.status_code
+                body = exc.body if isinstance(exc.body, dict) else {}
+                api_error = body.get('error', body)
+                provider_code = str(api_error.get('code', '')) if isinstance(api_error, dict) else ''
+                # Change only a rejected model, never bypass an organization,
+                # project, authentication, IP, spending or rate-limit control.
+                model_rejected = status == 403 and provider_code in GROQ_MODEL_PERMISSION_CODES
+                model_missing = status in (400, 404, 410) and provider_code in ('model_not_found', 'model_decommissioned')
+                if (model_rejected or model_missing) and self.switch_model(provider_code):
+                    continue
                 if status == 429:
                     self.last_rate_limit = groq_rate_limit_info(exc)
                 if status >= 500 and attempt < self.max_attempts - 1:
                     time.sleep(2 ** attempt)
                     attempt += 1
                     continue
-                body = exc.body if isinstance(exc.body, dict) else {}
-                api_error = body.get("error", body)
                 if isinstance(api_error, dict) and api_error.get("code") == "model_not_found":
                     issue = ai_issue("GROQ_MODEL_ERROR")
                 else:
@@ -2048,6 +2131,11 @@ def run_agents(case: dict, sources: list[dict], api_key: str, model: str) -> lis
         if llm.last_issue:
             raise llm.failure(llm.last_issue) from None
         raise
+    finally:
+        case['ai_model_requested'] = str(model).removeprefix('groq/')
+        case['ai_model_used'] = llm.model
+        case['ai_models_tried'] = list(llm.models_tried)
+        case['ai_model_switches'] = copy.deepcopy(llm.model_switches)
     if len(result.tasks_output) != len(AGENT_SPECS) or any(not (output.raw or "").strip() for output in result.tasks_output):
         raise AIServiceError("CREWAI_WORKFLOW_ERROR")
     outputs = [{"agent": role, "text": output.raw} for (role, _), output in zip(AGENT_SPECS, result.tasks_output)]
@@ -3874,9 +3962,15 @@ def show_current_case() -> None:
     st.caption('Mode: ' + case['mode'] + '. Review facts and jurisdiction before filing.')
     if case.get('ai_issue'):
         show_ai_issue(case['ai_issue'])
-        st.caption('This draft uses a local template. AI analysis can be retried by preparing a new complaint after resolving the connection issue.')
+        st.caption('Your case and letter are retained. Choose a permitted model or correct the Groq settings, then retry this complaint below.')
+        render_ai_recovery(case)
     elif case['mode'].startswith('Fallback template'):
-        st.warning('This earlier draft did not retain the AI failure details. Prepare the complaint again to get a diagnostic code if AI analysis still fails.')
+        st.warning('This earlier draft did not retain the AI failure details. Retry this complaint below for current analysis and a diagnostic if it fails.')
+        render_ai_recovery(case)
+    if case.get('ai_model_used') and not case.get('ai_issue'):
+        st.caption('AI model used: ' + case['ai_model_used'])
+        if case.get('ai_model_switches'):
+            st.info('AI analysis continued using another model after the first model was unavailable or restricted. Your case ID was retained.')
     st.write(f"Category: {case['category']} · City: {case['city']} · Status: {case['status']}")
     guidance = complaint_guidance(case, case.get('sources', []))
     st.markdown('**Recommended complaint route**' if guidance['source_supported'] else '**Suggested complaint route — verify**')
