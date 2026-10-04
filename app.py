@@ -129,6 +129,25 @@ def company_routes() -> dict:
     return routes
 
 
+def canonical_company(value: str) -> str:
+    """Resolve spelling/spacing aliases without guessing an unknown recipient."""
+    normalized = re.sub(r'[^a-z0-9]', '', str(value).casefold())
+    choices = set(COMPANY_CATEGORIES) | set(company_routes())
+    aliases = {'pakistantelecommunicationcompanylimited': 'PTCL',
+        'pakistantelecommobilelimited': 'Ufone', 'ufone4g': 'Ufone', 'ufone5g': 'Ufone',
+        'islamabadelectricsupplycompany': 'IESCO', 'geoentertainment': 'GEO TV',
+        'harpalgeo': 'GEO TV', 'geotv': 'GEO TV'}
+    for company in choices:
+        if normalized == re.sub(r'[^a-z0-9]', '', company.casefold()):
+            return company
+    return aliases.get(normalized, str(value).strip())
+
+
+def company_category(value: str, fallback: str = 'Other / Unsure') -> str:
+    company = canonical_company(value)
+    return COMPANY_CATEGORIES.get(company, company_routes().get(company, {}).get('category', fallback))
+
+
 def validate_evidence(uploads: dict[str, list], existing: list[dict] | None = None) -> list[dict]:
     """Validate file contents and retain bytes inside the existing JSON case store."""
     evidence = copy.deepcopy(existing or [])
@@ -211,11 +230,14 @@ def public_case_details(case: dict, include_identity: bool = False) -> dict:
     if include_identity:
         profile['cnic'] = case.get('profile', {}).get('cnic', '')
     return {'case_id': case['id'], 'name': case['name'], 'city': case['city'],
-        'contact': profile, 'company': case.get('company', ''),
+        'contact': profile, 'company': canonical_company(case.get('company', '')),
+        'category': case.get('category', ''), 'subject': case.get('subject', ''),
+        'complaint_description': case.get('complaint', ''),
         'service_number': case.get('service_number', ''),
         'incident_date': case.get('incident_date', ''),
         'previous_reference': case.get('previous_reference', ''),
-        'requested_resolution': case.get('requested_resolution', '')}
+        'requested_resolution': case.get('requested_resolution', ''),
+        'broadcast': case.get('broadcast', {}) if case.get('category') == 'Media / Broadcasting' else {}}
 
 
 def complaint_body(case: dict, include_identity: bool = False, selected: list[str] | None = None) -> str:
@@ -223,15 +245,29 @@ def complaint_body(case: dict, include_identity: bool = False, selected: list[st
     contact = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
         for key, value in details['contact'].items() if value)
     service = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
-        for key, value in details.items() if key != 'contact' and value)
-    body = (case['outputs'][3]['text'].strip() + '\n\nComplainant and service details:\n' +
-        service + '\n' + contact +
+        for key, value in details.items() if key not in ('contact', 'broadcast') and value)
+    broadcast = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
+        for key, value in details['broadcast'].items() if value and value != 'Not specified')
+    # The form particulars are included independently of the AI draft, so
+    # AI omissions cannot drop the original complaint, service or episode.
+    body = ('COMPLAINT PARTICULARS PROVIDED BY THE COMPLAINANT\n' + service + '\n' + contact +
+        ('\nBroadcast particulars:\n' + broadcast if broadcast else '') +
+        '\n\nREVIEWED COMPLAINT LETTER\n' + case['outputs'][3]['text'].strip() +
         '\n\nPlease acknowledge this complaint and issue your official complaint reference.\n' +
         'The PG case ID is the preparation application\'s internal reference.\n')
     if selected is not None:
         names = [item['name'] for item in case.get('evidence', []) if item['id'] in selected]
         body += '\nFiles included in this transmission:\n' + ('\n'.join('- ' + name for name in names) or 'None') + '\n'
     return body
+
+
+def submission_review_token(case: dict, selected: list[str], include_identity: bool) -> str:
+    route = company_routes().get(canonical_company(case.get('company', '')), {})
+    material = {'recipient': route.get('email', ''), 'company': canonical_company(case.get('company', '')),
+        'body': complaint_body(case, include_identity, selected), 'include_identity': include_identity,
+        'attachments': [{'id': item['id'], 'name': item['name'], 'sha256': item['sha256'],
+            'kind': item['kind'], 'mime_type': item['mime_type']} for item in case.get('evidence', []) if item['id'] in selected]}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def complaint_package(case: dict, selected: list[str], include_identity: bool = False) -> bytes:
@@ -284,7 +320,7 @@ def submission_validation(case: dict, route: dict | None) -> list[str]:
         problems.append('Select the company receiving this complaint.')
     if case['category'] in ('Telecom', 'Electricity') and not case.get('service_number', '').strip():
         problems.append('Enter the affected service/account/consumer number.')
-    if case.get('company') == 'IESCO' and not re.fullmatch(r'\d{14}', re.sub(r'[ -]', '', case.get('service_number', ''))):
+    if canonical_company(case.get('company', '')) == 'IESCO' and not re.fullmatch(r'\d{14}', re.sub(r'[ -]', '', case.get('service_number', ''))):
         problems.append('For IESCO, enter the 14-digit consumer reference printed on your bill.')
     if not case.get('name', '').strip() or not case.get('city', '').strip():
         problems.append('Enter the complainant name and city.')
@@ -303,12 +339,16 @@ def submission_database():
     return connection
 
 
-def send_complaint(case: dict, selected: list[str], include_identity: bool, consent: bool) -> dict:
+def send_complaint(case: dict, selected: list[str], include_identity: bool, consent: bool,
+                   review_token: str = '') -> dict:
     """Real email delivery with an atomic duplicate guard; no portal scraping."""
     if st.session_state.get('demo_mode', False):
         raise ValueError('Switch off Demo mode before sending a real complaint.')
     if not consent:
         raise ValueError('Review and authorize the recipient, details and attachments before sending.')
+    case['company'] = canonical_company(case.get('company', ''))
+    if review_token != submission_review_token(case, selected, include_identity):
+        raise ValueError('The submission changed since review. Review the current message and attachments again.')
     route = company_routes().get(case.get('company', ''))
     problems = submission_validation(case, route)
     if problems:
@@ -338,7 +378,7 @@ def send_complaint(case: dict, selected: list[str], include_identity: bool, cons
         message.add_attachment(evidence_bytes(item), maintype=major, subtype=minor, filename=item['name'])
     fingerprint = hashlib.sha256((route['email'] + body + ''.join(item['sha256'] for item in attachments)).encode()).hexdigest()
     receipt = {'channel': 'Email', 'company': case['company'], 'recipient': route['email'],
-        'message_id': str(message['Message-ID']), 'sent_at': datetime.now(timezone.utc).isoformat(),
+        'message_id': str(message['Message-ID']), 'requested_at': datetime.now(timezone.utc).isoformat(), 'sent_at': '',
         'attachments': [item['name'] for item in attachments], 'official_reference': '',
         'status': 'Sending'}
     db = submission_database()
@@ -365,7 +405,7 @@ def send_complaint(case: dict, selected: list[str], include_identity: bool, cons
                     data=json.dumps(payload).encode('utf-8'), method='POST', headers={
                         'Authorization': 'Bearer ' + settings['api_key'],
                         'Content-Type': 'application/json', 'User-Agent': 'ComplaintWorkspace/1.0',
-                        'Idempotency-Key': hashlib.sha256((owner + case['id']).encode()).hexdigest()})
+                        'Idempotency-Key': hashlib.sha256((owner + case['id'] + fingerprint).encode()).hexdigest()})
                 sending_started = True
                 with urlopen(request, timeout=30, context=context) as response:
                     result = json.loads(response.read(65536))
@@ -374,6 +414,7 @@ def send_complaint(case: dict, selected: list[str], include_identity: bool, cons
                 receipt['provider_id'] = result['id'][:200]
                 receipt['message_id'] = ''  # HTTPS provider supplies its own RFC message ID.
                 receipt['status'] = 'Email queued'
+                receipt['sent_at'] = datetime.now(timezone.utc).isoformat()
             else:
                 if settings['security'] == 'ssl':
                     smtp = smtplib.SMTP_SSL(settings['host'], settings['port'], timeout=30, context=context)
@@ -388,15 +429,20 @@ def send_complaint(case: dict, selected: list[str], include_identity: bool, cons
                 if refused:
                     raise smtplib.SMTPRecipientsRefused(refused)
                 receipt['status'] = 'Email sent'
+                receipt['sent_at'] = datetime.now(timezone.utc).isoformat()
         except HTTPError as error:
             receipt['status'] = 'Delivery uncertain' if error.code >= 500 or error.code == 409 else 'Failed'
+            receipt['error_code'] = ('EMAIL_AUTH_ERROR' if error.code in (401, 403) else
+                'EMAIL_RATE_LIMIT' if error.code == 429 else 'EMAIL_PROVIDER_ERROR')
         except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused,
                 smtplib.SMTPDataError, smtplib.SMTPAuthenticationError):
             receipt['status'] = 'Failed'
+            receipt['error_code'] = 'EMAIL_REJECTED'
         except Exception:
             # A timeout after DATA may mean the message was accepted. Never
             # automatically retry this ambiguous delivery and send duplicates.
             receipt['status'] = 'Delivery uncertain' if sending_started else 'Failed'
+            receipt['error_code'] = 'EMAIL_DELIVERY_UNCERTAIN' if sending_started else 'EMAIL_CONNECTION_ERROR'
         finally:
             if smtp is not None:
                 try:
@@ -1018,14 +1064,15 @@ def complaint_guidance(case: dict, sources: list[dict]) -> dict:
 
 
 def classify(complaint: str, selected: str) -> dict:
-    """Transparent keyword intake; ambiguous matches retain the selected category."""
+    """Respect the confirmed form category; use keywords only when unsure."""
     groups = {'Electricity': ['electricity', 'meter', 'bijli', 'بجلی'],
               'Telecom': ['mobile', 'sim', 'internet', 'telecom', 'broadband', 'انٹرنیٹ'],
               'Media / Broadcasting': ['pemra', 'broadcast', 'broadcasting', 'television', 'radio', 'channel', 'tv', 'drama', 'programme', 'program', 'ڈرامہ', 'چینل'],
               'Municipal Services': ['garbage', 'road', 'water', 'streetlight', 'sewerage', 'پانی']}
     words = set(re.findall(r'\w+', complaint.lower()))
     matches = [category for category, terms in groups.items() if words & set(terms)]
-    category = matches[0] if len(matches) == 1 else selected
+    category = selected if selected in JURISDICTIONS and selected != 'Other / Unsure' else (
+        matches[0] if len(matches) == 1 else 'Other / Unsure')
     if category not in JURISDICTIONS:
         category = 'Other / Unsure'
     if category == 'Electricity' and any(x in complaint.lower() for x in ['bill', 'billing', 'بل']):
@@ -1037,7 +1084,7 @@ def classify(complaint: str, selected: str) -> dict:
     return {'category': category, 'subcategory': problem, 'summary': complaint[:350],
             'organization': 'Not extracted by keyword rules; identify from the complaint description',
             'authority_hint': JURISDICTIONS[category]['initial_authority'],
-            'classification_method': 'Keyword rules; review category before filing'}
+            'classification_method': 'Confirmed form category' if selected != 'Other / Unsure' else 'Keyword rules; review category before filing'}
 
 
 def template_letter(case: dict) -> str:
@@ -1156,7 +1203,7 @@ def main() -> None:
     st.session_state.setdefault('cases', {})
     st.session_state.setdefault('recovery_token', uuid.uuid4().hex + uuid.uuid4().hex)
     st.sidebar.markdown('## Complaint desk')
-    page = st.sidebar.radio('Workspace', ['Home', 'New Complaint', 'Document preparation', 'My Cases', 'Regulations', 'Analytics', 'About'])
+    page = st.sidebar.radio('Workspace', ['Home', 'New Complaint', 'Submit complaint', 'Document preparation', 'My Cases', 'Regulations', 'Analytics', 'About'])
     demo_mode = st.sidebar.toggle('Demo mode (no API required)', value=False)
     st.session_state['demo_mode'] = demo_mode
     st.sidebar.caption('SQLite saves use a private recovery key. Cloud restarts may erase local files; download case backups.')
@@ -1283,14 +1330,15 @@ def main() -> None:
                     show_current_case()
                     return
                 key = secret('GROQ_API_KEY')
-                company = other_company.strip() if selected_company == 'Other / not listed' else (
-                    '' if selected_company == 'Choose company…' else selected_company)
+                company = canonical_company(other_company.strip() if selected_company == 'Other / not listed' else (
+                    '' if selected_company == 'Choose company…' else selected_company))
                 if category == 'Other / Unsure':
-                    category = COMPANY_CATEGORIES.get(company, company_routes().get(company, {}).get('category', category))
+                    category = company_category(company, category)
                 structured = classify(complaint, category)
                 if company:
                     structured['organization'] = company
                 route = JURISDICTIONS[structured['category']]
+                available_elsewhere = list(available_docs)
                 available_docs = list(dict.fromkeys(available_docs + [item['kind'] for item in evidence]))
                 case = {'id': 'PG-' + uuid.uuid4().hex[:10].upper(), 'name': name.strip(), 'city': city.strip(),
                         'complaint': complaint.strip(), 'category': structured['category'], 'intake': structured,
@@ -1304,6 +1352,7 @@ def main() -> None:
                     incident_date=incident_date.isoformat() if incident_date else '',
                     previous_reference=previous_reference.strip(), subject=subject.strip(),
                     requested_resolution=requested_resolution.strip(), evidence=evidence,
+                    available_elsewhere=available_elsewhere,
                     broadcast={'programme': programme.strip(), 'episode': episode.strip(),
                         'date_time': broadcast_time.strip(), 'platform': platform, 'scene': scene.strip()})
                 # Register a usable local case before retrieval or AI work.
@@ -1340,6 +1389,16 @@ def main() -> None:
                 st.session_state['current_case'] = case['id']
                 st.success('Draft created. Review it and click Save complaint to store it. Nothing has been submitted.')
         show_current_case()
+    elif page == 'Submit complaint':
+        current = st.session_state.get('current_case')
+        if current not in st.session_state.cases:
+            st.info('Prepare a complaint in New Complaint, or open a saved case in My Cases first.')
+            return
+        case = st.session_state.cases[current]
+        st.subheader('Submit your complaint · ' + current)
+        st.caption('The contact, service, incident, complaint and selected evidence fields are filled automatically from this case.')
+        render_letter_editor(case)
+        render_submission(case)
     elif page == 'Document preparation':
         current = st.session_state.get('current_case')
         if current not in st.session_state.cases:
@@ -1351,7 +1410,8 @@ def main() -> None:
         with st.form('documents'):
             available = [label for label in CHECKLIST if st.checkbox(label, value=label in case['audit']['available'])]
             if st.form_submit_button('Update readiness'):
-                case['audit'] = readiness(available)
+                case['available_elsewhere'] = available
+                case['audit'] = readiness(list(dict.fromkeys(available + [item['kind'] for item in case.get('evidence', [])])))
                 case['outputs'][2]['text'] = demo_outputs(case, case['sources'])[2]['text']
                 case['letter_needs_review'] = True
                 st.success('Checklist updated. Review the letter and update its attachment list, then save your case.')
@@ -1404,9 +1464,13 @@ def main() -> None:
         if st.button('Delete this case'):
             try:
                 delete_case(st.session_state.recovery_token, selected)
-                with submission_database() as db:
+                db = submission_database()
+                try:
                     owner = hashlib.sha256(st.session_state.recovery_token.encode()).hexdigest()
                     db.execute('DELETE FROM submission_log WHERE owner=? AND case_id=?', (owner, selected))
+                    db.commit()
+                finally:
+                    db.close()
                 del st.session_state.cases[selected]
                 st.rerun()
             except Exception:
@@ -1478,16 +1542,19 @@ def render_evidence_manager(case: dict) -> None:
         with st.form(case['id'] + '_evidence_form'):
             remove_ids = st.multiselect('Files to remove', [item['id'] for item in evidence],
                 format_func=lambda value: next(item['name'] for item in evidence if item['id'] == value))
-            uploads = evidence_upload_inputs(case['id'] + '_extra')
+            upload_version = case.get('evidence_widget_version', 0)
+            uploads = evidence_upload_inputs(case['id'] + f'_extra_{upload_version}')
             update = st.form_submit_button('Update evidence', type='primary')
         if update:
             try:
                 current = [item for item in evidence if item['id'] not in remove_ids]
                 updated = validate_evidence(uploads, current)
                 case['evidence'] = updated
-                case['audit'] = readiness(list(dict.fromkeys(case['audit']['available'] + [item['kind'] for item in updated])))
+                manual = case.get('available_elsewhere', case['audit']['available'])
+                case['audit'] = readiness(list(dict.fromkeys(manual + [item['kind'] for item in updated])))
                 case['outputs'][2]['text'] = demo_outputs(case, case.get('sources', []))[2]['text']
                 case['letter_needs_review'] = True
+                case['evidence_widget_version'] = upload_version + 1
                 st.success('Evidence updated. Review the letter, then save the case to retain these files.')
                 st.rerun()
             except ValueError as error:
@@ -1507,7 +1574,15 @@ def render_contact_editor(case: dict) -> None:
                 city = st.text_input('City', value=case['city'], max_chars=100)
                 phone = st.text_input('Contact phone number', value=profile.get('phone', ''), max_chars=25)
                 service = st.text_input('Service / account / consumer number', value=case.get('service_number', ''), max_chars=80)
-            company = st.text_input('Company name (must match an available route exactly)', value=case.get('company', ''), max_chars=120)
+            existing_company = canonical_company(case.get('company', ''))
+            company_options = ['Not specified'] + sorted(set(COMPANY_CATEGORIES) | set(company_routes()) |
+                ({existing_company} if existing_company else set())) + ['Other / not listed']
+            choice = st.selectbox('Company receiving the complaint', company_options,
+                index=company_options.index(existing_company) if existing_company else 0)
+            other_company = st.text_input('Company name if not listed', max_chars=120, key=case['id'] + '_edit_other_company')
+            category_options = list(JURISDICTIONS)
+            category = st.selectbox('Confirm complaint category', category_options,
+                index=category_options.index(case['category']))
             cnic = st.text_input('CNIC (optional)', value=profile.get('cnic', ''), max_chars=15)
             saved = st.form_submit_button('Update details')
         if saved:
@@ -1517,11 +1592,18 @@ def render_contact_editor(case: dict) -> None:
                 (cnic.strip() and not re.fullmatch(r'\d{5}-?\d{7}-?\d', cnic.strip()))):
                 st.warning('Check the name, city, email, phone and optional CNIC format.')
             else:
+                company = canonical_company(other_company if choice == 'Other / not listed' else ('' if choice == 'Not specified' else choice))
+                category = company_category(company, category)
                 profile.update(email=email.strip(), phone=phone.strip(), address=address.strip(), cnic=cnic.strip())
                 case.update(name=name.strip(), city=city.strip(), profile=profile,
-                    company=company.strip(), service_number=service.strip(), letter_needs_review=True)
+                    company=company, category=category, service_number=service.strip(), letter_needs_review=True)
+                case['intake']['category'] = category
                 case['intake']['organization'] = company.strip() or case['intake'].get('organization', '')
-                st.success('Details updated. Review the name, city and company in the complaint letter before sending.')
+                route = JURISDICTIONS[category]
+                case['authority'] = route['initial_authority']
+                case['escalation_authority'] = route['escalation_authority']
+                case['intake']['authority_hint'] = route['initial_authority']
+                st.rerun()
 
 
 def saved_submission(case: dict) -> dict | None:
@@ -1546,7 +1628,7 @@ def render_submission(case: dict) -> None:
     st.caption('Sending shares the selected complainant details and files with the company and the configured email delivery service.')
     render_contact_editor(case)
     routes = company_routes()
-    route = routes.get(case.get('company', ''))
+    route = routes.get(canonical_company(case.get('company', '')))
     if route:
         st.write('Company:', case['company'])
         st.write('Recipient:', route.get('label', case['company']), '—', route['email'])
@@ -1574,6 +1656,7 @@ def render_submission(case: dict) -> None:
             case['id'] + '-complaint-package.zip', 'application/zip', key=case['id'] + '_package')
     except ValueError as error:
         st.warning(str(error))
+    review_token = submission_review_token(case, selected, include_identity)
     receipt = saved_submission(case)
     if receipt:
         case['submission'] = receipt
@@ -1586,6 +1669,8 @@ def render_submission(case: dict) -> None:
         elif receipt['status'] == 'Failed':
             st.warning('The sending service did not accept the submission. Check the sending account configuration and retry, or use the downloaded package.')
         st.write('Last submission status:', receipt['status'])
+        if receipt.get('error_code'):
+            st.caption('Submission diagnostic: ' + receipt['error_code'])
         st.download_button('Download submission receipt', json.dumps(receipt, ensure_ascii=False, indent=2),
             case['id'] + '-submission-receipt.json', 'application/json', key=case['id'] + '_receipt')
     problems = submission_validation(case, route)
@@ -1604,15 +1689,16 @@ def render_submission(case: dict) -> None:
     if case.get('letter_needs_review'):
         st.warning('Your details or evidence changed. Review/edit the letter in Complaint letter, or regenerate the local template, before sending.')
     consent = st.checkbox('I have reviewed the message, recipient and selected files and authorize sending this complaint.',
-        key=case['id'] + '_send_consent')
-    reviewed = st.checkbox('The letter matches the current complainant and service details.', key=case['id'] + '_letter_confirm')
+        key=case['id'] + '_send_consent_' + review_token[:16])
+    reviewed = st.checkbox('The letter matches the current complainant and service details.',
+        key=case['id'] + '_letter_confirm_' + review_token[:16])
     locked = bool(receipt and receipt['status'] in ('Sending', 'Email sent', 'Email queued', 'Delivery uncertain'))
     if st.button('Send complaint online', type='primary', key=case['id'] + '_send',
         disabled=bool(problems or not delivery_ready or demo_mode or not consent or not reviewed or locked),
         use_container_width=True):
         try:
             with st.spinner('Sending the reviewed complaint and selected evidence…'):
-                receipt = send_complaint(case, selected, include_identity, consent)
+                receipt = send_complaint(case, selected, include_identity, consent, review_token)
             case['submission'] = receipt
             case['letter_needs_review'] = False
             if receipt['status'] in ('Email sent', 'Email queued'):
@@ -1631,6 +1717,23 @@ def persist(case: dict) -> None:
         st.success('Case and uploaded evidence saved. Download a backup to retain a copy across deployment restarts.')
     except Exception:
         st.error('Saving failed. Download the case backup and try again.')
+
+
+def render_letter_editor(case: dict) -> None:
+    current = case['id']
+    if case.get('letter_needs_review'):
+        st.warning('Details or evidence changed. Review the letter or regenerate the template from your latest inputs.')
+    st.caption('Edit the letter below. Regenerating the local template uses current form details without another AI request.')
+    if st.button('Regenerate from current form details', key=current + 'generate'):
+        case['outputs'][3]['text'] = template_letter(case)
+        case['letter_origin'] = 'Local template — chosen by user'
+        case['letter_needs_review'] = False
+        st.session_state[current + 'petition'] = case['outputs'][3]['text']
+    previous = case['outputs'][3]['text']
+    case['outputs'][3]['text'] = st.text_area('Edit complaint letter', previous, height=350, key=current + 'petition')
+    if case['outputs'][3]['text'] != previous:
+        case['letter_needs_review'] = False
+    st.download_button('Download letter (.txt)', case['outputs'][3]['text'], 'complaint.txt')
 
 
 def show_current_case() -> None:
@@ -1670,17 +1773,7 @@ def show_current_case() -> None:
             if output['agent'] == 'Petition':
                 if case.get('letter_origin') == 'Local template — AI letter incomplete':
                     st.info('The AI letter was incomplete. A local draft with placeholders is shown below; review it before filing.')
-                if case.get('letter_needs_review'):
-                    st.warning('Checklist changed. Review and update the attachment list in this letter.')
-                st.caption('Analyze Complaint already prepares this letter. Edit it below. Use local template replaces it with a basic draft without another AI request.')
-                if st.button('Use local template', key=current + 'generate'):
-                    case['outputs'][3]['text'] = template_letter(case)
-                    case['letter_origin'] = 'Local template — chosen by user'
-                    case['letter_needs_review'] = False
-                    st.session_state[current + 'petition'] = case['outputs'][3]['text']
-                    st.success('Generated a fact-based template letter; review before filing.')
-                output['text'] = st.text_area('Edit complaint letter', output['text'], height=350, key=current + 'petition')
-                st.download_button('Download letter (.txt)', output['text'], 'complaint.txt')
+                render_letter_editor(case)
             else:
                 st.write(output['text'])
                 if output['agent'] == 'Readiness':
