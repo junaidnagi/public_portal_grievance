@@ -1818,8 +1818,8 @@ def apply_interface() -> None:
     [data-testid="stMetric"]{padding:15px;background:white;border:1px solid #dbe4ef;border-radius:14px}
     @media(max-width:700px){.block-container{padding:1rem}.hero{padding:20px}.hero h1{font-size:1.6rem}}
     </style>''', unsafe_allow_html=True)
-    st.markdown('''<div class="hero"><div class="eyebrow">Citizen complaint workspace</div>
-        <h1>Make your complaint count.</h1><p>Prepare a clear complaint, organize your evidence, and follow its progress.</p></div>''', unsafe_allow_html=True)
+    st.markdown('''<div class="hero"><div class="eyebrow">An AI-powered citizen complaint workspace</div>
+        <h1>Public Grievance Assistant</h1><p>Prepare clear complaints, organize evidence and manage follow-up.</p></div>''', unsafe_allow_html=True)
 
 
 def valid_email(value: str) -> bool:
