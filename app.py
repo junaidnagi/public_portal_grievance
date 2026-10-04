@@ -3,6 +3,7 @@ import os
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 os.environ.setdefault("CREWAI_TELEMETRY_DISABLED", "true")
 import io
+import inspect
 import json
 import re
 import time
@@ -104,7 +105,7 @@ VERIFIED_ROUTES = {
 LAW_SECTORS = ('FIA / Federal offences', 'Police', 'Cybercrime / NCCIA')
 SECTOR_AUTHORITIES = {'Telecom': ['PTA'], 'Media / Broadcasting': ['PEMRA'],
     'Electricity': ['IESCO', 'NEPRA'], 'FIA / Federal offences': ['FIA'],
-    'Police': ['POLICE'], 'Cybercrime / NCCIA': ['NCCIA']}
+    'Police': ['POLICE'], 'Cybercrime / NCCIA': ['NCCIA'], 'Municipal Services': ['MUNICIPAL']}
 STARTER_NAMES = {
     'Telecom': ['Jazz', 'Zong', 'Ufone', 'Telenor', 'PTCL', 'SCO / SCOM',
         'Nayatel', 'StormFiber', 'Transworld Home', 'Cybernet', 'WorldCall',
@@ -170,6 +171,160 @@ LEGAL_NOTES = [
     {'authority': 'NCCIA', 'source_file': 'NCCIA_complaint_requirements_note.txt', 'source_url': 'https://complaint.nccia.gov.pk/',
      'text': 'NCCIA publishes a cybercrime complaint registration form requiring name, CNIC, gender, mobile, city, crime category, crime details and CAPTCHA. Cybercrime complaints have this distinct official channel. Use the current Prevention of Electronic Crimes Act, 2016 as amended, and verify operative provisions before citing offences. The complete amended law is not embedded in this note.'},
 ]
+
+
+# Published contacts for civic bodies, service agencies and local-government
+# departments. Department addresses are never substituted for a council office.
+MUNICIPAL_DIRECTORY = [
+    {'name': 'Capital Development Authority (CDA)', 'province': 'Islamabad Capital Territory', 'city': 'Islamabad', 'kind': 'Civic authority', 'address': 'CDA Secretariat, Khayaban-e-Suharwardi, Sector G-7/4, Islamabad', 'website': 'https://cda.gov.pk/', 'source_url': 'https://cda.gov.pk/contactUs', 'phone': '051-9253016 / 051-9252962', 'services': 'CDA civic services; select the relevant directorate in the official portal.', 'portal_url': 'https://complaints.cda.gov.pk/', 'portal_instructions': 'Create / sign in to your CDA account, choose the relevant civic category and directorate, upload evidence and retain the issued reference.'},
+    {'name': 'Metropolitan Corporation Islamabad (MCI)', 'province': 'Islamabad Capital Territory', 'city': 'Islamabad', 'kind': 'Municipal corporation', 'address': 'Shared CDA / MCI Public Grievance and Complaints Cell: CDA Secretariat, Block-V, Sector G-7/4, Islamabad', 'website': 'https://www.cda.gov.pk/public/', 'source_url': 'https://www.cda.gov.pk/public/contactUs', 'phone': '051-9253016 / 051-9252962', 'services': 'Shared complaints-cell contact; confirm whether the service belongs to MCI or CDA. This address is the shared cell, not a separate MCI headquarters.'},
+    {'name': 'CDA Directorate of Municipal Administration (DMA)', 'province': 'Islamabad Capital Territory', 'city': 'Islamabad', 'kind': 'Municipal directorate', 'address': 'DMA Office, Fire Headquarters, Sector G-7/4, Islamabad', 'website': 'https://cda.gov.pk/', 'source_url': 'https://cda.gov.pk/procedures', 'phone': '051-9252838', 'services': 'Municipal administration; confirm the directorate responsible for the issue.', 'portal_url': 'https://complaints.cda.gov.pk/', 'portal_instructions': 'Select Municipal Administration where relevant in the CDA portal; confirm jurisdiction before filing.'},
+    {'name': 'CDA Directorate of Sanitation', 'province': 'Islamabad Capital Territory', 'city': 'Islamabad', 'kind': 'Municipal directorate', 'address': 'Sector G-6/1-4, near New Aabpara Market, Islamabad', 'website': 'https://cda.gov.pk/', 'source_url': 'https://cda.gov.pk/procedures', 'phone': '051-9203216', 'services': 'Sanitation and cleanliness within the directorate’s jurisdiction.', 'portal_url': 'https://complaints.cda.gov.pk/', 'portal_instructions': 'Select the sanitation category and give the exact sector, street and site in the CDA portal.'},
+    {'name': 'Karachi Metropolitan Corporation (KMC)', 'province': 'Sindh', 'city': 'Karachi', 'kind': 'Municipal corporation', 'address': 'KMC Head Office, 1st Floor, M.A. Jinnah Road, Karachi', 'website': 'https://www.kmc.gos.pk/', 'source_url': 'https://commissionerkarachi.gos.pk/index.php/municipal-services', 'phone': '1339', 'services': 'Metropolitan services; some local issues belong to the relevant town municipal corporation.'},
+    {'name': 'Hyderabad Municipal Corporation (HMC)', 'province': 'Sindh', 'city': 'Hyderabad', 'kind': 'Municipal corporation', 'address': 'Mayor Office Secretariat, Thandi Sarak, Hyderabad, Sindh', 'website': 'https://hmcsindh.gos.pk/', 'source_url': 'https://hmcsindh.gos.pk/contact-us', 'services': 'Municipal services; verify the relevant taluka / town and service responsibility.'},
+    {'name': 'Sukkur Municipal Corporation (SMC)', 'province': 'Sindh', 'city': 'Sukkur', 'kind': 'Municipal corporation', 'address': 'Sukkur Municipal Corporation, Sukkur, Sindh 65200', 'address_note': 'The published contact page gives the city / postal code only. Confirm the street and receiving office before postal filing.', 'website': 'https://smc.gos.pk/', 'source_url': 'https://smc.gos.pk/contact', 'services': 'Municipal services in the corporation’s jurisdiction.'},
+    {'name': 'Sindh Solid Waste Management Board (SSWMB)', 'province': 'Sindh', 'city': 'Karachi', 'kind': 'Waste management authority', 'address': '3rd Floor, DMC (South) Building, opposite Aram Bagh Police Station, near Haqqani Chowk, District South, Karachi', 'website': 'https://sswmb.gos.pk/', 'source_url': 'https://commissionerkarachi.gos.pk/index.php/municipal-services', 'phone': '1128', 'services': 'Solid-waste complaints in areas served by the board.'},
+    {'name': 'Karachi Water & Sewerage Corporation (KW&SC)', 'province': 'Sindh', 'city': 'Karachi', 'kind': 'Water and sewerage service agency', 'address': 'Head Office, behind Civic Centre, old KBCA Building, Gulshan-e-Iqbal, Karachi', 'website': 'https://www.kwsb.gos.pk/', 'source_url': 'https://commissionerkarachi.gos.pk/index.php/municipal-services', 'phone': '021-99245138 / 021-99245140', 'services': 'Water supply and sewerage within the corporation’s service area.'},
+    {'name': 'Metropolitan Corporation Lahore', 'province': 'Punjab', 'city': 'Lahore', 'kind': 'Municipal corporation', 'address': 'Town Hall, Lahore', 'website': 'https://lahore-mc.punjab.gov.pk/', 'source_url': 'https://www.punjab.gov.pk/autonomous-bodies', 'address_source_url': 'https://www.opmispunjab.gov.pk/Complaint/Online/PrintOnlineCauseList?OrganizationID=4', 'services': 'Municipal services; confirm the current local-government structure and relevant receiving office.'},
+    {'name': 'Punjab Local Government & Community Development Department', 'province': 'Punjab', 'city': 'Lahore', 'kind': 'Provincial department / local-council guidance', 'address': 'Government of the Punjab Civil Secretariat, Lahore', 'website': 'https://lgcd.punjab.gov.pk/', 'source_url': 'https://lgcd.punjab.gov.pk/contact_us', 'phone': '042-99210013-4', 'services': 'Provincial guidance / oversight. Ask for the correct municipal corporation, committee or union council for your locality; this is not every local council’s address.'},
+    {'name': 'Lahore Waste Management Company (LWMC)', 'province': 'Punjab', 'city': 'Lahore', 'kind': 'Waste management service agency', 'address': '4th Floor, Shaheen Complex, Egerton Road, Lahore', 'website': 'https://lwmc.com.pk/', 'source_url': 'https://lwmc.com.pk/communication.php', 'services': 'Waste collection and sanitation in its service area; check current complaint arrangements.'},
+    {'name': 'Rawalpindi Waste Management Company (RWMC)', 'province': 'Punjab', 'city': 'Rawalpindi', 'kind': 'Waste management service agency', 'address': '81-A Block, Iran Road, Satellite Town, Rawalpindi, Punjab', 'website': 'https://rwmc.org.pk/', 'source_url': 'https://rwmc.org.pk/RWMC-files/Submit-Complaint.php', 'services': 'Waste collection and cleanliness within its service area.', 'portal_url': 'https://rwmc.org.pk/RWMC-files/Submit-Complaint.php', 'portal_instructions': 'Use the official Submit Complaint form, enter your location and particulars, and retain any acknowledgement.'},
+    {'name': 'Water and Sanitation Agency Multan (WASA)', 'province': 'Punjab', 'city': 'Multan', 'kind': 'Water and sewerage service agency', 'address': '316-A, Shamsabad Colony, WASA Head Office, Multan, Punjab', 'website': 'https://www.wasamultan.gop.pk/', 'source_url': 'https://www.wasamultan.gop.pk/contact.php', 'services': 'Water supply and sewerage in WASA Multan’s service area.'},
+    {'name': 'Water & Sanitation Services Peshawar (WSSP)', 'province': 'Khyber Pakhtunkhwa', 'city': 'Peshawar', 'kind': 'Water, sanitation and waste service agency', 'address': 'LCB Building, Plot 33, Street 13, Sector E-8, Phase-7, Hayatabad, Peshawar', 'website': 'https://wsspeshawar.org.pk/', 'source_url': 'https://wsspeshawar.org.pk/contant_page', 'phone': '1334', 'services': 'Water, sanitation and waste services; confirm the relevant service zone.'},
+    {'name': 'Khyber Pakhtunkhwa Local Government, Elections & Rural Development Department', 'province': 'Khyber Pakhtunkhwa', 'city': 'Peshawar', 'kind': 'Provincial department / local-council guidance', 'address': 'Police Lines Road, Civil Secretariat, Peshawar, Khyber Pakhtunkhwa', 'website': 'https://www.lgkp.gov.pk/', 'source_url': 'https://www.lgkp.gov.pk/', 'phone': '091-9211450', 'services': 'Guidance / oversight for the relevant tehsil, village or neighbourhood council. The department is distinct from an individual local council.'},
+    {'name': 'Metropolitan Corporation Quetta (MCQ)', 'province': 'Balochistan', 'city': 'Quetta', 'kind': 'Municipal corporation', 'address': 'Anscomb Road, Quetta, Balochistan', 'website': 'https://mcq.gob.pk/', 'source_url': 'https://mcq.gob.pk/', 'phone': '0800-09999 / 081-9201685', 'services': 'Municipal sanitation, streetlights and other corporation services.'},
+    {'name': 'Balochistan Local Government & Rural Development Department', 'province': 'Balochistan', 'city': 'Quetta', 'kind': 'Provincial department / local-council guidance', 'address': 'Zarghoon Road, Block 14, Civil Secretariat, Quetta, Balochistan', 'website': 'https://lgrd.gob.pk/', 'source_url': 'https://lgrd.gob.pk/contact-us/', 'phone': '081-9201277', 'services': 'Provincial guidance / oversight; identify your local corporation, municipal committee or district / union council. This is the department’s address.'},
+    {'name': 'WASH Unit, LG&RD Department Gilgit-Baltistan', 'province': 'Gilgit-Baltistan', 'city': 'Gilgit', 'kind': 'Local-government water and sanitation unit', 'address': 'WASH Unit, LG&RD Department, Jutial, Gilgit', 'website': 'https://lgwash.gog.pk/', 'source_url': 'https://lgwash.gog.pk/about-wash-unit/', 'services': 'Water, sanitation and hygiene coordination; confirm the implementing local body for an individual service complaint.'},
+    {'name': 'Azad Jammu & Kashmir Local Government & Rural Development Department', 'province': 'Azad Jammu & Kashmir', 'city': 'Muzaffarabad', 'kind': 'Territorial department / local-council guidance', 'address': '', 'address_note': 'A current street address was not confirmed from an official contact page. Use the official government directory to confirm the receiving LG&RD office before postal filing.', 'website': 'https://ajk.gov.pk/', 'source_url': 'https://www.ajkppra.gov.pk/uploadfiles/tenderdocuments/1775129383P3GW7%20-%20Tender%20LG%26RD%20Muzaffarabad.pdf', 'services': 'Contact the relevant municipal corporation / committee or LG&RD office for your locality. The government homepage is a directory entry, not a complaint submission form.'},
+]
+for _municipal in MUNICIPAL_DIRECTORY:
+    _municipal['checked_on'] = '2026-10-04'
+STARTER_NAMES['Municipal Services'] = [entry['name'] for entry in MUNICIPAL_DIRECTORY]
+VERIFIED_ROUTES['Capital Development Authority (CDA)'] = {'email': 'cdacares@cda.gov.pk', 'category': 'Municipal Services',
+    'source_url': 'https://www.cda.gov.pk/public/contactUs', 'portal_url': 'https://complaints.cda.gov.pk/',
+    'checked_on': '2026-10-04', 'label': 'CDA Public Grievance and Complaints Cell', 'verified': True}
+VERIFIED_ROUTES['Metropolitan Corporation Quetta (MCQ)'] = {'email': 'administrator@mcq.gob.pk', 'category': 'Municipal Services',
+    'source_url': 'https://mcq.gob.pk/', 'checked_on': '2026-10-04', 'label': 'MCQ published suggestions and complaints email', 'verified': True}
+
+
+def municipal_entry(name: str) -> dict | None:
+    return next((row for row in MUNICIPAL_DIRECTORY if row['name'] == name), None)
+
+
+def render_municipal_contact(name: str, prefix: str = 'municipal') -> None:
+    entry = municipal_entry(name)
+    if not entry:
+        return
+    with st.container(border=True):
+        st.markdown('**' + entry['name'] + '**')
+        st.caption(entry['kind'] + ' · ' + entry['city'] + ', ' + entry['province'])
+        st.write('Published receiving address:', entry['address'] or 'Current street address not confirmed')
+        if entry.get('address_note'):
+            st.caption(entry['address_note'])
+        if entry.get('phone'):
+            st.write('Published phone / helpline:', entry['phone'])
+        st.write(entry['services'])
+        st.markdown('[Official website](' + entry['website'] + ') · [Contact / directory source](' + entry['source_url'] + ')')
+        if entry.get('address_source_url'):
+            st.markdown('[Published office address source](' + entry['address_source_url'] + ')')
+        if entry.get('portal_url'):
+            st.link_button('Visit this authority’s official complaint portal', entry['portal_url'], key=prefix + '_municipal_portal')
+        st.caption('Directory checked 4 October 2026. Confirm current jurisdiction and postal details before filing.')
+
+
+WORKSPACE_PAGES = ['Home', 'New Complaint', 'Complaint details', 'Complaint review', 'Document preparation',
+    'Submit complaint', 'My Cases', 'Companies & authorities', 'Regulations', 'Analytics', 'About']
+COMPLAINT_STEPS = [('New Complaint', 'Details'), ('Complaint review', 'Review'),
+    ('Document preparation', 'Evidence'), ('Submit complaint', 'Submit'), ('My Cases', 'Track / disposal')]
+
+
+def navigate_to(page: str) -> None:
+    if page not in WORKSPACE_PAGES:
+        return
+    current = st.session_state.get('current_case')
+    case = st.session_state.get('cases', {}).get(current)
+    if case:
+        try:
+            save_case(st.session_state.recovery_token, case)
+        except Exception:
+            st.session_state['_workflow_save_error'] = True
+    st.session_state['_next_workspace_page'] = page
+
+
+def stretch_args(widget) -> dict:
+    """Support both current and older Streamlit width parameters."""
+    try:
+        return {'width': 'stretch'} if 'width' in inspect.signature(widget).parameters else {'use_container_width': True}
+    except (TypeError, ValueError):
+        return {'use_container_width': True}
+
+
+def workflow_navigation(page: str, case: dict | None = None) -> None:
+    routes = {
+        'Complaint details': ('Complaint review', 'Back: complaint review', 'Complaint review', 'Next: review complaint'),
+        'Complaint review': ('Complaint details', 'Back: edit complaint details', 'Document preparation', 'Next: evidence'),
+        'Document preparation': ('Complaint review', 'Back: review complaint', 'Submit complaint', 'Next: review & submit'),
+        'Submit complaint': ('Document preparation', 'Back: evidence', 'My Cases', 'Next: tracking & disposal'),
+        'My Cases': ('Submit complaint', 'Back: submission', 'New Complaint', 'Start another complaint'),
+    }
+    if page not in routes:
+        return
+    back, back_label, forward, next_label = routes[page]
+    st.divider()
+    left, right = st.columns(2)
+    with left:
+        st.button(back_label, key='flow_back_' + page, on_click=navigate_to, args=(back,), **stretch_args(st.button))
+    with right:
+        st.button(next_label, key='flow_next_' + page, type='primary', on_click=navigate_to, args=(forward,),
+            disabled=bool(page == 'Complaint review' and case and case.get('letter_needs_review')), **stretch_args(st.button))
+    if page == 'Document preparation':
+        st.caption('Apply any new uploads with Update evidence before continuing. You can continue with the evidence you have; the optional readiness checklist does not block submission.')
+    elif page == 'Complaint details':
+        st.caption('Use Update details or Save complaint details to apply edited fields before continuing to review.')
+    elif page == 'Submit complaint' and case and case.get('status') == 'Draft':
+        st.caption('You can continue to tracking to record a manual filing. This case is still a draft until an actual submission is recorded.')
+
+
+def transition_case(case: dict, status: str, origin: str, reference: str | None = None, note: str = '') -> None:
+    old_status = case.get('status', 'Draft')
+    old_reference = case.get('reference', '')
+    if reference is not None:
+        case['reference'] = reference
+    case['status'] = status
+    if old_status != status or old_reference != case.get('reference', '') or note:
+        case.setdefault('status_history', []).append({'at': datetime.now(timezone.utc).isoformat(),
+            'from': old_status, 'to': status, 'origin': origin, 'reference': case.get('reference', ''), 'note': note})
+
+
+def render_case_facts_editor(case: dict) -> None:
+    render_contact_editor(case)
+    with st.form(case['id'] + '_facts_editor'):
+        subject = st.text_input('Complaint subject', value=case.get('subject', ''), max_chars=150)
+        complaint = st.text_area('Complaint facts', value=case['complaint'], height=160, max_chars=10000)
+        relief = st.text_area('Requested resolution', value=case.get('requested_resolution', ''), max_chars=1500)
+        previous = st.text_input('Previous complaint reference', value=case.get('previous_reference', ''), max_chars=100)
+        incident = st.date_input('Incident date (optional)', value=date.fromisoformat(case['incident_date']) if case.get('incident_date') else None)
+        broadcast = dict(case.get('broadcast', {}))
+        if case.get('category') == 'Media / Broadcasting':
+            for field in ('programme', 'episode', 'date_time', 'scene', 'platform'):
+                broadcast[field] = st.text_input('Broadcast ' + field.replace('_', ' '), value=broadcast.get(field, ''), max_chars=1500)
+        apply = st.form_submit_button('Save complaint details')
+    if apply:
+        if not complaint.strip():
+            st.warning('Enter the complaint facts before continuing.')
+        else:
+            case.update(subject=subject.strip(), complaint=complaint.strip(), requested_resolution=relief.strip(),
+                previous_reference=previous.strip(), incident_date=incident.isoformat() if incident else '', broadcast=broadcast)
+            case['intake'] = classify(case['complaint'], case['category'])
+            case['intake']['organization'] = case.get('company', '')
+            case['sources'] = safe_retrieve(case['complaint'], case['category'], case.get('law_enforcement', {}).get('incident_province', ''))
+            case['outputs'] = demo_outputs(case, case['sources'])
+            case['letter_origin'] = 'Local template from updated complaint details'
+            case['letter_needs_review'] = True
+            st.session_state.pop(case['id'] + 'petition', None)
+            persist(case)
+            st.success('Details updated. Continue to review the refreshed letter before submission.')
+
 
 
 def parse_licensees(data: bytes, filename: str) -> list[dict]:
@@ -241,11 +396,21 @@ def complaint_destination(case: dict) -> dict | None:
 def render_sector_picker(prefix: str, initial: str = 'Other / Unsure', existing: str = '') -> tuple[str, str, str]:
     sector = st.selectbox('Complaint category', list(JURISDICTIONS), index=list(JURISDICTIONS).index(initial), key=prefix + '_sector')
     names = companies_for_sector(sector)
-    if existing and company_category(existing, initial) == sector and existing not in names:
+    if sector == 'Municipal Services':
+        regions = ['All Pakistan'] + list(dict.fromkeys(row['province'] for row in MUNICIPAL_DIRECTORY))
+        region = st.selectbox('Municipal province / territory', regions, key=prefix + '_municipal_region')
+        if region != 'All Pakistan':
+            names = [n for n in names if (municipal_entry(n) or {}).get('province') == region]
+    if (existing and company_category(existing, initial) == sector and existing not in names
+        and (sector != 'Municipal Services' or region == 'All Pakistan'
+             or (municipal_entry(existing) or {}).get('province') == region)):
         names.append(existing)
     options = ['Choose company…'] + names + ['Other / not listed']
-    selected = st.selectbox('Company / service provider' if sector not in LAW_SECTORS else 'Receiving agency / police authority',
-        options, index=options.index(existing) if existing in options else 0, key=prefix + '_company_' + sector)
+    selected = st.selectbox('Municipal authority / service agency' if sector == 'Municipal Services' else 'Company / service provider' if sector not in LAW_SECTORS else 'Receiving agency / police authority',
+        options, index=options.index(existing) if existing in options else 0, key=prefix + '_company_' + sector + ('_' + region if sector == 'Municipal Services' else ''))
+    if sector == 'Municipal Services':
+        render_municipal_contact(selected, prefix)
+        st.caption('Choose the body responsible for the specific service and locality. Cantonment boards, town / union councils and provincial service agencies have different boundaries. This is a sourced directory, not a complete national register; use Other / not listed where needed.')
     other = st.text_input('Company / authority name if not listed', max_chars=200, key=prefix + '_other') if selected == 'Other / not listed' else ''
     if sector in ('Telecom', 'Media / Broadcasting'):
         count = sum(r['sector'] == sector for r in licensee_records())
@@ -259,7 +424,18 @@ def render_directory() -> None:
     st.subheader('Companies, channels and receiving authorities')
     st.write('Import the complete PTA / PEMRA tables to add every listed company and channel. Imported licence records do not configure complaint recipients.')
     sector = st.selectbox('Directory sector', list(STARTER_NAMES), key='directory_sector')
-    st.dataframe([{'Name': n} for n in companies_for_sector(sector)], hide_index=True, use_container_width=True)
+    if sector == 'Municipal Services':
+        region = st.selectbox('Filter municipal directory by province / territory', ['All Pakistan'] + list(dict.fromkeys(r['province'] for r in MUNICIPAL_DIRECTORY)))
+        rows = [r for r in MUNICIPAL_DIRECTORY if region == 'All Pakistan' or r['province'] == region]
+        st.dataframe([{'Name': r['name'], 'Province / territory': r['province'], 'City': r['city'], 'Type': r['kind'],
+            'Published address': r['address'] or 'Current street address not confirmed', 'Address note': r.get('address_note', ''),
+            'Official website': r['website'], 'Official source': r['source_url']} for r in rows], hide_index=True, **stretch_args(st.dataframe))
+        choice = st.selectbox('Municipal authority contact details', [r['name'] for r in rows])
+        render_municipal_contact(choice, 'municipal_directory')
+        st.download_button('Download municipal contacts (.json)', json.dumps(MUNICIPAL_DIRECTORY, ensure_ascii=False, indent=2), 'municipal-authorities.json', 'application/json')
+        st.caption('Published contacts include municipal bodies, service agencies and provincial / territorial guidance departments. This directory does not include every town, cantonment, union council or municipal committee in Pakistan.')
+        return
+    st.dataframe([{'Name': n} for n in companies_for_sector(sector)], hide_index=True, **stretch_args(st.dataframe))
     st.caption('No complete licensee table was found in the supplied project. The starter directory is not the regulator’s complete or current register.')
     st.link_button('PEMRA official satellite-TV register', 'https://pemra.gov.pk/stv/')
     st.link_button('PTA official website / licensee lists', 'https://www.pta.gov.pk/')
@@ -320,7 +496,7 @@ def supplemental_legal_hits(query: str, category: str | None, province: str = ''
     authorities = SECTOR_AUTHORITIES.get(category)
     chunks = list(st.session_state.get('legal_source_chunks', []))
     root = Path(__file__).parent / 'policies'
-    for authority in ('FIA', 'POLICE', 'NCCIA'):
+    for authority in ('FIA', 'POLICE', 'NCCIA', 'MUNICIPAL'):
         if authorities and authority not in authorities:
             continue
         for suffix in ('*.pdf', '*.txt'):
@@ -342,12 +518,13 @@ def supplemental_legal_hits(query: str, category: str | None, province: str = ''
 
 
 def render_legal_collections() -> None:
-    with st.expander('FIA, police and cybercrime legal collections', expanded=True):
+    with st.expander('FIA, police, cybercrime and municipal legal collections', expanded=True):
         st.write('The app combines the existing sector FAISS index with separate FIA / POLICE / NCCIA source collections and cited routing notes. Built-in notes identify laws and scope; complete amended statutes must be supplied to retrieve precise provisions.')
         for note in LEGAL_NOTES:
             st.markdown(f"[{note['source_file']}]({note['source_url']})")
         st.caption('Full law sources: FIA Act and current Schedule; trafficking / migrant-smuggling legislation; PPC and CrPC; province-specific police law and amendments; current amended PECA. Place PDF/TXT copies under policies/FIA/, policies/POLICE/ or policies/NCCIA/. Scanned PDFs require OCR first. Local source copies use keyword retrieval. Independently built semantic indexes can be placed at legal_indexes/FIA/, legal_indexes/POLICE/ and legal_indexes/NCCIA/ (authority metadata must match the collection). Existing FAISS remains semantic.')
-        authority = st.selectbox('Collection for uploaded legal material', ['FIA', 'POLICE', 'NCCIA'], key='legal_upload_authority')
+        authority = st.selectbox('Collection for uploaded legal material', ['FIA', 'POLICE', 'NCCIA', 'MUNICIPAL'], key='legal_upload_authority')
+        st.caption('Municipal legislation: add current local-government statutes, service rules and bylaws to the MUNICIPAL collection (policies/MUNICIPAL/ or legal_indexes/MUNICIPAL/). Applicability depends on the province, locality and service. No municipal offence or numbered provision is invented from contact-directory entries.')
         uploads = st.file_uploader('Add legal source PDFs / TXT', type=['pdf', 'txt'], accept_multiple_files=True, key='legal_upload')
         if st.button('Add to legal collection', disabled=not uploads):
             try:
@@ -446,6 +623,12 @@ PORTAL_CATALOGUE = {
 
 def portal_choices(case: dict) -> list[dict]:
     choices = list(PORTAL_CATALOGUE.get(case.get('category'), []))
+    if case.get('category') == 'Municipal Services':
+        entry = municipal_entry(canonical_company(case.get('company', '')))
+        if entry:
+            choices.insert(0, {'label': entry['name'] + (' complaint portal' if entry.get('portal_url') else ' official website / contact directory'),
+                'addressee': entry['name'], 'url': entry.get('portal_url', entry['website']),
+                'instructions': entry.get('portal_instructions', 'This is the official website / directory, not a confirmed online complaint form. Follow its published complaint arrangements or verify the receiving office. Opening this page does not file a complaint.')})
     name = canonical_company(case.get('company', ''))
     channel = OFFICIAL_CHANNELS.get(name)
     if channel:
@@ -494,11 +677,13 @@ def render_portal_submission(case: dict, selected: list[str], include_identity: 
         if not reference.strip() or not confirmed:
             st.warning('Enter the issued reference and confirm receipt before recording a portal submission.')
         else:
-            case.update(reference=reference.strip(), status='Submitted', portal_submission={
+            transition_case(case, 'Submitted', 'User-reported official portal acknowledgement', reference.strip())
+            case.update(portal_submission={
                 'channel': entry['label'], 'url': entry['url'], 'official_reference': reference.strip(),
                 'recorded_at': datetime.now(timezone.utc).isoformat(), 'verification': 'User-reported acknowledgement; not verified by the app'})
             persist(case)
-            st.success('Your reported portal acknowledgement has been recorded.')
+            navigate_to('My Cases')
+            st.rerun()
     if case.get('portal_submission'):
         st.caption('Portal acknowledgement (reported by you): ' + case['portal_submission']['official_reference'])
 
@@ -692,8 +877,14 @@ def company_routes() -> dict:
 def canonical_company(value: str) -> str:
     """Resolve spelling/spacing aliases without guessing an unknown recipient."""
     normalized = re.sub(r'[^a-z0-9]', '', str(value).casefold())
-    choices = set(COMPANY_CATEGORIES) | set(company_routes()) | set(POLICE_PROVINCES) | {'NCCIA'}
-    aliases = {'pakistantelecommunicationcompanylimited': 'PTCL',
+    choices = set(COMPANY_CATEGORIES) | set(company_routes()) | set(POLICE_PROVINCES) | {r['name'] for r in MUNICIPAL_DIRECTORY} | {'NCCIA'}
+    aliases = {'cda': 'Capital Development Authority (CDA)', 'mci': 'Metropolitan Corporation Islamabad (MCI)',
+        'kmc': 'Karachi Metropolitan Corporation (KMC)', 'hmc': 'Hyderabad Municipal Corporation (HMC)',
+        'smc': 'Sukkur Municipal Corporation (SMC)', 'mcq': 'Metropolitan Corporation Quetta (MCQ)',
+        'sswmb': 'Sindh Solid Waste Management Board (SSWMB)', 'kwsc': 'Karachi Water & Sewerage Corporation (KW&SC)',
+        'kwsb': 'Karachi Water & Sewerage Corporation (KW&SC)', 'lwmc': 'Lahore Waste Management Company (LWMC)',
+        'rwmc': 'Rawalpindi Waste Management Company (RWMC)', 'wssp': 'Water & Sanitation Services Peshawar (WSSP)',
+        'wasamultan': 'Water and Sanitation Agency Multan (WASA)', 'pakistantelecommunicationcompanylimited': 'PTCL',
         'pakistantelecommobilelimited': 'Ufone', 'ufone4g': 'Ufone', 'ufone5g': 'Ufone',
         'islamabadelectricsupplycompany': 'IESCO', 'geoentertainment': 'GEO TV',
         'harpalgeo': 'GEO TV', 'geotv': 'GEO TV'}
@@ -810,6 +1001,7 @@ def public_case_details(case: dict, include_identity: bool = False) -> dict:
         'broadcast': case.get('broadcast', {}) if case.get('category') == 'Media / Broadcasting' else {},
         'law_enforcement': case.get('law_enforcement', {}) if case.get('category') in LAW_SECTORS else {},
         'receiving_office': case.get('filing_addressee') or (pemra_office(case)[0] if case.get('category') == 'Media / Broadcasting' else canonical_company(case.get('company', ''))),
+        'municipal_authority': dict(municipal_entry(canonical_company(case.get('company', ''))) or {}) if case.get('category') == 'Municipal Services' else {},
         'email_route': case.get('pemra_email_mode', 'Central complaint email / forwarding request') if case.get('category') == 'Media / Broadcasting' else 'Verified organization email'}
 
 
@@ -818,11 +1010,13 @@ def complaint_body(case: dict, include_identity: bool = False, selected: list[st
     contact = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
         for key, value in details['contact'].items() if value)
     service = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
-        for key, value in details.items() if key not in ('contact', 'broadcast', 'law_enforcement') and value)
+        for key, value in details.items() if key not in ('contact', 'broadcast', 'law_enforcement', 'municipal_authority') and value)
     broadcast = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
         for key, value in details['broadcast'].items() if value and value != 'Not specified')
     enforcement = '\n'.join(f'{key.replace("_", " ").title()}: {value}'
         for key, value in details['law_enforcement'].items() if value)
+    municipal = details.get('municipal_authority', {})
+    municipal_text = '\n'.join(key.replace('_', ' ').title() + ': ' + str(value) for key, value in municipal.items() if value)
     # The form particulars are included independently of the AI draft, so
     # AI omissions cannot drop the original complaint, service or episode.
     forwarding = ''
@@ -834,6 +1028,7 @@ def complaint_body(case: dict, include_identity: bool = False, selected: list[st
         '\n\nANNEX — COMPLETE COMPLAINANT PARTICULARS\n' + service + '\n' + contact +
         ('\nBroadcast particulars:\n' + broadcast if broadcast else '') +
         ('\nLaw enforcement particulars:\n' + enforcement if enforcement else '') +
+        ('\nPublished municipal contact:\n' + municipal_text if municipal_text else '') +
         '\n\nThe PG case ID is this preparation application’s internal reference. Please issue your official acknowledgement/reference.\n')
     if selected is not None:
         names = [item['name'] for item in case.get('evidence', []) if item['id'] in selected]
@@ -1657,6 +1852,15 @@ def complaint_guidance(case: dict, sources: list[dict]) -> dict:
                 target_authority=pemra_office(case)[1]['addressee'], source_supported=True, basis=source_label(source),
                 scope='Retrieved PEMRA material supports a complaint route for relevant broadcast content. The appropriate Council/officer can depend on jurisdiction and current filing arrangements.',
                 next_step='Complete the broadcast particulars and submit the complaint through the current applicable PEMRA channel.')
+    elif category == 'Municipal Services':
+        entry = municipal_entry(canonical_company(case.get('company', '')))
+        advice['details_to_add'] = ['Municipal authority / service agency', 'Exact street, sector, ward / union council and incident location',
+            'Service issue and date', 'Prior complaint reference and photos / records, if available']
+        if entry:
+            advice.update(route=entry['name'] + ' — verify service responsibility and territorial boundaries',
+                target_authority=entry['name'], source_supported=True, basis=entry['source_url'],
+                scope=entry['services'], next_step='Review the selected authority’s contact details, complete location and evidence, and continue to submission.')
+        advice['assessment'] = 'The directory supports contact identification. It does not establish a legal violation or that this body must decide the reported dispute.'
     elif category in LAW_SECTORS:
         code = SECTOR_AUTHORITIES[category][0]
         source = next((item for item in sources if item.get('authority') == code), None)
@@ -1840,7 +2044,16 @@ def main() -> None:
     st.session_state.setdefault('cases', {})
     st.session_state.setdefault('recovery_token', uuid.uuid4().hex + uuid.uuid4().hex)
     st.sidebar.markdown('## Complaint desk')
-    page = st.sidebar.radio('Workspace', ['Home', 'New Complaint', 'Submit complaint', 'Document preparation', 'My Cases', 'Companies & authorities', 'Regulations', 'Analytics', 'About'])
+    if '_next_workspace_page' in st.session_state:
+        st.session_state['workspace_page'] = st.session_state.pop('_next_workspace_page')
+    page = st.sidebar.radio('Workspace', WORKSPACE_PAGES, key='workspace_page')
+    if st.session_state.pop('_workflow_save_error', False):
+        st.warning('Your case is retained in this session, but saving failed. Download a full case backup under tracking before closing.')
+    step_page = 'New Complaint' if page == 'Complaint details' else page
+    step_index = next((i for i, item in enumerate(COMPLAINT_STEPS) if item[0] == step_page), None)
+    if step_index is not None:
+        st.progress((step_index + 1) / len(COMPLAINT_STEPS), text=f'Step {step_index + 1} of {len(COMPLAINT_STEPS)} · {COMPLAINT_STEPS[step_index][1]}')
+        st.caption('Details → Review → Evidence → Submit → Tracking / disposal')
     demo_mode = st.sidebar.toggle('Demo mode (no API required)', value=False)
     st.session_state['demo_mode'] = demo_mode
     st.sidebar.caption('SQLite saves use a private recovery key. Cloud restarts may erase local files; download case backups.')
@@ -1859,6 +2072,7 @@ def main() -> None:
         metrics[0].metric('Cases in this session', len(st.session_state.cases))
         metrics[1].metric('Evidence files', sum(len(c.get('evidence', [])) for c in st.session_state.cases.values()))
         metrics[2].metric('Verified email routes', len(company_routes()))
+        st.button('Start a new complaint', type='primary', on_click=navigate_to, args=('New Complaint',))
         st.subheader('Demo complaint')
         st.code('My electricity bill this month is Rs 45,000 although my normal bill is approximately Rs 8,000. I contacted the electricity company but the issue has not been resolved.', language=None)
         st.caption('Copy this fictional example into New Complaint. Demo mode produces deterministic outputs without running CrewAI or Groq.')
@@ -1964,7 +2178,7 @@ def main() -> None:
                 if st.checkbox(item, key=f'new_document_{i}'):
                     available_docs.append(item)
             st.caption('Live analysis sends your name, city, complaint text, requested resolution, broadcast and incident particulars, checklist and regulatory excerpts to Groq. Contact fields, service numbers, identity fields and file contents are excluded. Avoid private numbers inside the complaint description. Nothing is sent to a company until you use Review & submit.')
-            analyze = st.form_submit_button('Prepare complaint', type='primary', use_container_width=True)
+            analyze = st.form_submit_button('Prepare complaint', type='primary', **stretch_args(st.form_submit_button))
         if analyze:
             if not complaint.strip():
                 st.warning('Enter a complaint description first.')
@@ -2042,8 +2256,27 @@ def main() -> None:
                         case['outputs'] = demo_outputs(case, sources)
                 st.session_state.cases[case['id']] = case
                 st.session_state['current_case'] = case['id']
-                st.success('Draft created. Review it and click Save complaint to store it. Nothing has been submitted.')
-        show_current_case()
+                navigate_to('Complaint review')
+                st.rerun()
+        current = st.session_state.get('current_case')
+        if current in st.session_state.cases:
+            st.info('You have an active case: ' + current + '. Preparing the form above creates a separate new case.')
+            st.button('Continue current complaint', on_click=navigate_to, args=('Complaint review',))
+    elif page in ('Complaint details', 'Complaint review'):
+        current = st.session_state.get('current_case')
+        if current not in st.session_state.cases:
+            st.info('Start a complaint first.')
+            st.button('Start a complaint', on_click=navigate_to, args=('New Complaint',))
+            return
+        case = st.session_state.cases[current]
+        if page == 'Complaint details':
+            st.subheader('Edit complaint details · ' + current)
+            render_case_facts_editor(case)
+        else:
+            st.subheader('Review your complaint · ' + current)
+            show_current_case()
+            render_letter_editor(case)
+        workflow_navigation(page, case)
     elif page == 'Submit complaint':
         current = st.session_state.get('current_case')
         if current not in st.session_state.cases:
@@ -2054,6 +2287,7 @@ def main() -> None:
         st.caption('The contact, service, incident, complaint and selected evidence fields are filled automatically from this case.')
         render_letter_editor(case)
         render_submission(case)
+        workflow_navigation(page, case)
     elif page == 'Document preparation':
         current = st.session_state.get('current_case')
         if current not in st.session_state.cases:
@@ -2076,6 +2310,7 @@ def main() -> None:
             st.write('Unchecked:', case['audit']['missing'])
             st.caption('Score = checked items ÷ 5 × 100. An unchecked item does not mean the complaint cannot be filed.')
         render_evidence_manager(case)
+        workflow_navigation(page, case)
     elif page == 'My Cases':
         st.subheader('Saved cases')
         st.caption('Save the private recovery key before closing. Anyone with it can access your saved cases; this is a beginner access mechanism, not account authentication.')
@@ -2101,18 +2336,30 @@ def main() -> None:
             st.info('Create a complaint first.')
             return
         st.dataframe([{'Case ID': c['id'], 'Category': c['category'], 'Authority': c['authority'], 'Created': c['date'], 'Status': c['status']} for c in st.session_state.cases.values()], hide_index=True)
-        selected = st.selectbox('Case', list(st.session_state.cases))
+        case_ids = list(st.session_state.cases)
+        active = st.session_state.get('current_case')
+        selected = st.selectbox('Case', case_ids, index=case_ids.index(active) if active in case_ids else 0, key='tracking_case_' + str(active))
         case = st.session_state.cases[selected]
         st.session_state['current_case'] = selected
-        with st.form('tracking'):
-            statuses = ['Draft', 'Email queued', 'Email sent', 'Submitted', 'Waiting for Response', 'Resolved', 'Escalation Required']
+        with st.form('tracking_' + case['id']):
+            statuses = ['Draft', 'Email queued', 'Email sent', 'Submitted', 'Waiting for Response', 'Resolved', 'Disposed / closed', 'Rejected', 'Escalation Required']
             status = st.selectbox('Status (updated manually)', statuses, index=statuses.index(case['status']) if case['status'] in statuses else 0)
             reference = st.text_input('Complaint reference', case['reference'], max_chars=100)
             follow_up = st.date_input('Personal follow-up date (optional)', value=date.fromisoformat(case['follow_up']) if case['follow_up'] else None)
+            disposal = case.get('disposal', {})
+            disposal_date = st.date_input('Authority response / disposal date (optional)', value=date.fromisoformat(disposal['date']) if disposal.get('date') else None)
+            outcome = st.text_area('Authority response / disposal outcome', value=disposal.get('outcome', ''), max_chars=2000, height=100)
+            closure_confirmed = st.checkbox('For a resolved, closed or rejected case: I confirm this outcome reflects the authority’s response or the actual case result.')
+            st.caption('These updates are recorded by you; the app does not independently verify disposal. Email delivery alone is not resolution.')
             opt_in = st.checkbox('Include this case in my aggregate analytics', value=case['analytics_consent'])
             if st.form_submit_button('Save changes'):
-                case.update(status=status, reference=reference, follow_up=follow_up.isoformat() if follow_up else '', analytics_consent=opt_in)
-                persist(case)
+                if status in ('Resolved', 'Disposed / closed', 'Rejected') and (not closure_confirmed or not disposal_date or not (outcome.strip() or reference.strip())):
+                    st.warning('For disposal, enter the response date and outcome or official reference, and confirm the recorded result.')
+                else:
+                    transition_case(case, status, 'User-reported tracking update', reference.strip(), outcome.strip() if outcome.strip() != disposal.get('outcome', '') else '')
+                    case.update(follow_up=follow_up.isoformat() if follow_up else '', analytics_consent=opt_in,
+                        disposal={'date': disposal_date.isoformat() if disposal_date else '', 'outcome': outcome.strip(), 'verification': 'User-reported; not independently verified'})
+                    persist(case)
         st.download_button('Download full case backup (.json)', json.dumps(case, ensure_ascii=False, indent=2), selected + '.json', 'application/json')
         if st.button('Complaint Not Resolved'):
             st.info('Possible next authority: ' + case['escalation_authority'] + '. Verify jurisdiction, prior complaint requirements and appeal eligibility before escalating. ' + UNVERIFIED)
@@ -2130,7 +2377,11 @@ def main() -> None:
                 st.rerun()
             except Exception:
                 st.error('The case could not be deleted. Try again.')
+        if case.get('status_history'):
+            with st.expander('Submission and case-status history', expanded=True):
+                st.dataframe(case['status_history'], hide_index=True, **stretch_args(st.dataframe))
         show_current_case()
+        workflow_navigation(page, case)
     elif page == 'Companies & authorities':
         render_directory()
     elif page == 'Regulations':
@@ -2181,7 +2432,7 @@ def render_evidence_manager(case: dict) -> None:
     evidence = case.get('evidence', [])
     if evidence:
         st.dataframe([{'File': item['name'], 'Document type': item['kind'],
-            'Size (KB)': round(item['size'] / 1024, 1)} for item in evidence], hide_index=True, use_container_width=True)
+            'Size (KB)': round(item['size'] / 1024, 1)} for item in evidence], hide_index=True, **stretch_args(st.dataframe))
         with st.expander('Preview / download evidence'):
             for item in evidence:
                 st.markdown('**' + html.escape(item['name']) + '** · ' + item['kind'])
@@ -2286,6 +2537,8 @@ def render_submission(case: dict) -> None:
     st.write('The app can send the reviewed complaint and selected files to a verified complaint email for the receiving organization or regulator. The company will issue its own reference after acknowledging it.')
     st.caption('Sending shares the selected complainant details and files with the company and the configured email delivery service.')
     render_contact_editor(case)
+    if case.get('category') == 'Municipal Services':
+        render_municipal_contact(case.get('company', ''), case['id'] + '_submit')
     routes = company_routes()
     route = complaint_destination(case)
     channel = OFFICIAL_CHANNELS.get(canonical_company(case.get('company', '')))
@@ -2335,6 +2588,14 @@ def render_submission(case: dict) -> None:
             if office.get('address'):
                 st.write('Published address:', office['address'])
             st.link_button('Confirm current office address', office['source_url'])
+        if case.get('category') == 'Municipal Services':
+            entry = municipal_entry(canonical_company(case.get('company', '')))
+            if entry:
+                st.write('Address to:', entry['name'])
+                st.write('Published receiving address:', entry['address'] or 'Confirm current receiving-office address before posting.')
+                if entry.get('address_note'):
+                    st.caption(entry['address_note'])
+                st.link_button('Confirm current municipal office details', entry['source_url'])
         st.info('Print the reviewed complaint and selected evidence, verify the receiving address, and retain a dated receipt. Record its reference under My Cases.')
     review_token = submission_review_token(case, selected, include_identity)
     receipt = saved_submission(case)
@@ -2375,15 +2636,16 @@ def render_submission(case: dict) -> None:
     locked = bool(receipt and receipt['status'] in ('Sending', 'Email sent', 'Email queued', 'Delivery uncertain'))
     if st.button('Send complaint online', type='primary', key=case['id'] + '_send',
         disabled=bool(method != 'Email from this app' or case.get('letter_needs_review') or problems or not delivery_ready or demo_mode or not consent or not reviewed or locked),
-        use_container_width=True):
+        **stretch_args(st.button)):
         try:
             with st.spinner('Sending the reviewed complaint and selected evidence…'):
                 receipt = send_complaint(case, selected, include_identity, consent, review_token)
             case['submission'] = receipt
             case['letter_needs_review'] = False
             if receipt['status'] in ('Email sent', 'Email queued'):
-                case['status'] = receipt['status']
+                transition_case(case, receipt['status'], 'Sending service acceptance; official registration awaited')
             persist(case)
+            navigate_to('My Cases')
             st.rerun()
         except ValueError as error:
             st.warning(str(error))
@@ -2433,7 +2695,7 @@ def show_current_case() -> None:
     st.caption('Mode: ' + case['mode'] + '. Review facts and jurisdiction before filing.')
     if case.get('ai_issue'):
         show_ai_issue(case['ai_issue'])
-        st.caption('The draft below uses a local template. After fixing the issue, click Analyze Complaint again to request AI analysis.')
+        st.caption('This draft uses a local template. AI analysis can be retried by preparing a new complaint after resolving the connection issue.')
     elif case['mode'].startswith('Fallback template'):
         st.warning('This earlier draft did not retain the AI failure details. Open AI connection check, then analyze the complaint again to get a diagnostic code.')
     st.write(f"Category: {case['category']} · City: {case['city']} · Status: {case['status']}")
@@ -2446,7 +2708,7 @@ def show_current_case() -> None:
     st.write('Next step: ' + guidance['next_step'])
     if guidance.get('assessment'):
         st.caption(guidance['assessment'])
-    st.caption('Recommendations use the supplied source copies. Confirm current official filing requirements before submission.')
+    st.caption('Routing uses supplied source copies and published official contact directories. Confirm current filing requirements before submission.')
     score = case['audit']['score']
     summary = st.columns(3)
     summary[0].metric('Evidence readiness', 'Not assessed' if score is None else f'{score}%')
@@ -2454,19 +2716,21 @@ def show_current_case() -> None:
     summary[2].metric('Case status', case['status'])
     if score is None:
         st.caption('Not assessed means the optional checklist has not been completed. It does not prevent a complaint draft.')
-    labels = ['Summary', 'Authority', 'Evidence', 'Complaint letter', 'Review & submit', 'Tracking']
-    for tab, output in zip(st.tabs(labels), case['outputs']):
-        with tab:
-            if output['agent'] == 'Petition':
-                if case.get('letter_origin') == 'Local template — AI letter incomplete':
-                    st.info('The AI letter was incomplete. A local draft with placeholders is shown below; review it before filing.')
-                render_letter_editor(case)
-            else:
+    st.markdown('**Complaint summary**')
+    st.write(case.get('subject') or case['intake']['subcategory'])
+    st.write(case['complaint'])
+    st.caption('Complainant: ' + case['name'] + ' · ' + case['city'] + ' · Authority / provider: ' + (case.get('company') or 'Select before filing'))
+    if case.get('requested_resolution'):
+        st.write('Requested resolution:', case['requested_resolution'])
+    if case.get('category') == 'Municipal Services':
+        render_municipal_contact(case.get('company', ''), current + '_summary')
+    with st.expander('Analysis and next-step notes'):
+        for output in case['outputs']:
+            if output['agent'] != 'Petition':
+                st.markdown('**' + output['agent'] + '**')
                 st.write(output['text'])
-                if output['agent'] == 'Readiness':
-                    render_evidence_manager(case)
-                elif output['agent'] == 'Routing':
-                    render_submission(case)
+    if st.session_state.get('workspace_page') != 'Complaint review':
+        st.button('Open complaint review', key=current + '_open_review', on_click=navigate_to, args=('Complaint review',))
     with st.expander('Sources used for this analysis'):
         st.caption('PDF excerpts are source copies; built-in / TXT summaries are secondary guidance. Neither is a finding about the specific programme or incident.')
         for source in case['sources']:
