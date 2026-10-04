@@ -1,0 +1,76 @@
+IESCO COMPLAINT ROUTING SUMMARY
+For RAG / CrewAI complaint classification
+Last reviewed: 03 October 2026
+
+ORGANIZATION
+Islamabad Electric Supply Company (IESCO)
+
+PRIMARY ROLE
+IESCO is responsible for supply, distribution and sale of electricity across its jurisdiction. IESCO's official site currently provides complaint-management access and lists Call 118 and SMS 8118.
+
+ROUTE TO IESCO FIRST WHEN THE COMPLAINT INVOLVES AN IESCO CONSUMER AND
+- Power failure / outage / fault
+- Load-shedding related service issue
+- Low/high voltage or voltage fluctuation
+- Defective or malfunctioning electricity meter
+- Meter-reading issue
+- Incorrect/excessive electricity bill
+- Connection/service issue
+- New electricity connection
+- Disconnection/reconnection
+- Consumer account/reference-number service matter
+- Other day-to-day electricity distribution/service complaints
+
+COMMON KEYWORDS
+IESCO, electricity, power outage, light gone, no electricity, load shedding, voltage,
+meter, meter reading, bill, electricity bill, connection, reconnection, SDO, XEN,
+reference number, transformer, fault.
+
+CURRENT COMPLAINT CHANNELS
+- Call: 118
+- SMS: 8118
+IESCO has also announced digital complaint monitoring through its service channels/apps.
+
+IMPORTANT ESCALATION RULE
+IESCO is the first-line service provider for its consumers. If the consumer has already complained to IESCO/concerned SDO/XEN and the dispute remains unresolved, the matter may be escalated to NEPRA under the applicable complaint-handling framework.
+
+APP ROUTING LOGIC
+1. Complaint concerns electricity.
+2. City/area falls in IESCO jurisdiction.
+3. Determine whether this is a first-line operational/service complaint.
+4. If YES -> route to IESCO.
+5. Ask whether consumer already complained to IESCO/SDO/XEN.
+6. If repeated complaint remains unresolved/disputed -> mark NEPRA as escalation authority.
+
+MINIMUM INFORMATION TO COLLECT
+- Name
+- City/area
+- Consumer/reference number
+- Mobile number
+- Complaint category
+- Complaint description
+- Date/time issue began
+- Meter/bill details where relevant
+- Prior IESCO complaint number, if any
+- Supporting bill/photo/document where relevant
+
+CLASSIFICATION EXAMPLES
+"There has been no electricity in my street since morning." -> IESCO / Power failure
+"My IESCO meter is defective." -> IESCO / Meter complaint
+"My electricity bill is double the normal amount and I have not complained before." -> IESCO / Billing complaint
+"I have repeatedly complained to IESCO and XEN about an incorrect bill but it remains unresolved." -> IESCO service provider + NEPRA escalation
+"My Jazz SIM is not receiving signals." -> NOT IESCO; PTA
+"A TV programme violated broadcast standards." -> NOT IESCO; PEMRA
+
+OFFICIAL SOURCES
+IESCO official website:
+https://iesco.com.pk/
+
+IESCO current official site lists:
+Call 118
+SMS 8118
+
+IESCO December 2025 public information states that 118 services accept complaints including power faults, load shedding, voltage issues, new electricity connections and other matters, and that complaints can be monitored digitally.
+
+NEPRA Consumer Service Manual also governs electricity consumer-service standards applicable to DISCO consumers:
+https://nepra.org.pk/Legislation/7-Manuals/2025/CONSUMER%20SERVICE%20MANUAL%20%28CSM%29%20REVISED%202025.pdf

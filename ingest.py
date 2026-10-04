@@ -6,6 +6,7 @@ import shutil
 import sys
 import subprocess
 import tempfile
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import faiss
@@ -13,9 +14,18 @@ from pypdf import PdfReader
 from tokenizers import Tokenizer
 from rag import DEFAULT_EMBEDDING_MODEL, embed_texts, get_embedder
 
+COLLECTIONS = ('IESCO', 'NEPRA', 'PEMRA', 'PTA', 'FIA', 'POLICE', 'NCCIA', 'MUNICIPAL', 'MOHTASIB', 'RTS')
+PROVINCES = ('Punjab', 'Sindh', 'Khyber Pakhtunkhwa', 'Balochistan', 'Islamabad Capital Territory', 'Gilgit-Baltistan', 'Azad Jammu & Kashmir')
+
+
 def authority_for(path: str) -> str:
-    for authority in ['IESCO','NEPRA','PEMRA','PTA']:
-        if authority in path.upper():
+    # Prefer a collection folder to a statute filename mentioning two agencies.
+    parts = str(path).replace('\\', '/').split('/')
+    for part in parts[:-1]:
+        if part.upper() in COLLECTIONS:
+            return part.upper()
+    for authority in COLLECTIONS:
+        if re.search(r'(?<![A-Z0-9])' + authority + r'(?![A-Z0-9])', str(path).upper()):
             return authority
     return 'General'
 
@@ -40,12 +50,18 @@ def ocr_page(path: Path, page_number: int) -> str:
         return result.stdout
 
 
-def read_documents(folder: Path, ocr: bool=False) -> tuple[list[dict],dict]:
+def read_documents(folder: Path, ocr: bool=False, default_authority: str='') -> tuple[list[dict],dict]:
     pages, report = [], {'files': [], 'warnings': []}
     if not folder.is_dir():
         raise ValueError('Input folder does not exist: '+str(folder))
+    if default_authority and default_authority not in COLLECTIONS:
+        raise ValueError('Unknown legal collection: ' + default_authority)
     provenance_file = folder/'source_manifest.json'
     provenance = json.loads(provenance_file.read_text()) if provenance_file.exists() else {}
+    if folder.name.upper() in COLLECTIONS and (folder.parent/'source_manifest.json').exists():
+        shared = json.loads((folder.parent/'source_manifest.json').read_text())
+        prefix = folder.name + '/'
+        provenance.update({key[len(prefix):]: value for key, value in shared.items() if key.startswith(prefix)})
     files = sorted(p for p in folder.rglob('*') if p.is_file() and p.suffix.lower() in ['.pdf','.txt'])
     for path in files:
         name = path.relative_to(folder).as_posix()
@@ -54,10 +70,17 @@ def read_documents(folder: Path, ocr: bool=False) -> tuple[list[dict],dict]:
             report['warnings'].append(name+': over 30 MB; skipped.')
             report['files'].append(record)
             continue
-        base = {'source_file':name,'source':name,'authority':authority_for(name),
-                'source_kind':'secondary_summary' if path.suffix.lower()=='.txt' else 'policy_pdf',
-                'verified':False,'file_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
-                'source_url':provenance.get(name,{}).get('source_url','')}
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        source = provenance.get(name,{})
+        province = next((part for part in path.relative_to(folder).parts if part in PROVINCES), '')
+        verified = (source.get('verified') is True and source.get('file_sha256') == digest
+                    and str(source.get('source_url', '')).startswith('https://'))
+        base = {'source_file':name,'source':name,
+                'authority':default_authority or (folder.name.upper() if folder.name.upper() in COLLECTIONS else authority_for(name)),
+                'source_kind':source.get('source_kind', 'secondary_summary' if path.suffix.lower()=='.txt' else 'policy_pdf'),
+                'verified':verified,'file_sha256':digest,'province':source.get('province', province),
+                'source_url':source.get('source_url',''), 'checked_on':source.get('checked_on',''),
+                'provenance':source.get('provenance', 'Local source copy; authenticity and legal currency require review')}
         extracted = []
         try:
             if path.suffix.lower()=='.txt':
@@ -118,8 +141,8 @@ def split_text(text: str, tokenizer, chunk_tokens: int=96, overlap_tokens: int=1
             break
     return chunks
 
-def build_index(input_folder: Path, output_folder: Path, model_name: str=DEFAULT_EMBEDDING_MODEL, ocr: bool=False) -> dict:
-    pages,report = read_documents(input_folder, ocr=ocr)
+def build_index(input_folder: Path, output_folder: Path, model_name: str=DEFAULT_EMBEDDING_MODEL, ocr: bool=False, default_authority: str='') -> dict:
+    pages,report = read_documents(input_folder, ocr=ocr, default_authority=default_authority)
     if not pages:
         raise ValueError('No usable text found. Check PDF text and TXT encoding. Image-only PDFs require OCR.')
     embedder = get_embedder(model_name)
@@ -167,9 +190,25 @@ def main() -> int:
     parser.add_argument('--output',type=Path,default=Path(__file__).parent/'faiss_index')
     parser.add_argument('--model',default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument('--ocr', action='store_true', help='OCR scanned pages using installed Tesseract/Poppler')
+    parser.add_argument('--authority', choices=COLLECTIONS, default='', help='Authority for a single collection; otherwise inferred from folders/names.')
+    parser.add_argument('--all-collections', action='store_true', help='Build a separate index for each non-empty authority folder; leaves the base sector index intact.')
+    parser.add_argument('--collections-output', type=Path, default=Path(__file__).parent/'legal_indexes')
     args = parser.parse_args()
     try:
-        report = build_index(args.input,args.output,args.model,ocr=args.ocr)
+        if args.all_collections:
+            built = 0
+            for code in COLLECTIONS:
+                source = args.input / code
+                if not source.is_dir() or not any(p.suffix.lower() in ('.pdf', '.txt') for p in source.rglob('*') if p.is_file()):
+                    print('Not built (no source files):', code)
+                    continue
+                report = build_index(source, args.collections_output/code, args.model, ocr=args.ocr, default_authority=code)
+                built += 1
+                print(f"Created {code}: {report['chunk_count']} chunks; {len(report['warnings'])} warnings. Review ingest_report.json.")
+            if not built:
+                raise ValueError('No populated collection folders found. Add current primary laws under policies/AUTHORITY/province/.')
+            return 0
+        report = build_index(args.input,args.output,args.model,ocr=args.ocr, default_authority=args.authority)
         print(f"Created {report['chunk_count']} chunks from {report['readable_page_count']} readable pages/sections in {args.output}")
         for warning in report['warnings']: print('Warning:',warning)
         print('Review ingest_report.json for skipped pages. Filenames and pages are preserved in chunks.json.')

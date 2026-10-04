@@ -2,17 +2,28 @@
 import hashlib
 import json
 import sqlite3
+import os
+from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / 'cases.sqlite3'
+DB_PATH = Path(os.environ.get('CASE_DB_PATH', str(Path(__file__).parent / 'cases.sqlite3')))
 
 def owner_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
+@contextmanager
 def connect():
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.execute('CREATE TABLE IF NOT EXISTS cases (owner TEXT, id TEXT, body TEXT, PRIMARY KEY(owner,id))')
-    return connection
+    try:
+        DB_PATH.chmod(0o600)
+    except OSError:
+        pass
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 def save_case(token: str, case: dict) -> None:
     with connect() as db:

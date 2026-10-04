@@ -6,3 +6,8 @@ faiss-cpu==1.15.1
 numpy==2.3.5
 fastembed==0.7.4
 tokenizers==0.23.2
+reportlab>=4.4,<5
+arabic-reshaper>=3.0,<4
+python-bidi>=0.6,<1
+Pillow>=10.4,<13
+pydeck>=0.9,<1

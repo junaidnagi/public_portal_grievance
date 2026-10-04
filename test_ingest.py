@@ -62,4 +62,60 @@ class IngestChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp, self.assertRaises(FileNotFoundError):
             rag.search_index('electricity',directory=Path(temp))
 
+    def test_content_search_also_returns_distinct_primary_routing_rules(self):
+        import faiss
+        import hashlib
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp)
+            first = 'Filing complaints: any person aggrieved by a programme may lodge '
+            second = 'a complaint before the Council of Complaints or authorized officer where it is viewed.'
+            rows = [
+                ('PEMRA_Code.pdf', 8, 'Religious tolerance: programmes must not incite religious hatred.', [0.98, 0.1, 0.1], 'policy_pdf', 'PEMRA', 0),
+                ('PEMRA_COC.pdf', 3, first, [0.1, 0.98, 0.1], 'policy_pdf', 'PEMRA', 0),
+                ('PEMRA_COC.pdf', 3, second, [0.1, 0.95, 0.1], 'policy_pdf', 'PEMRA', len(first)),
+                ('PEMRA_Ordinance.pdf', 23, 'Each Council shall receive and review complaints against programmes broadcast through a licence issued by the Authority.', [0.1, 0.1, 0.98], 'policy_pdf', 'PEMRA', 0),
+                ('PEMRA_summary.txt', None, 'PEMRA receives complaints about television programmes.', [0.4, 0.4, 0.4], 'secondary_summary', 'PEMRA', 0),
+                ('NEPRA_policy.pdf', 1, 'Electricity consumer billing complaint.', [1, 0, 0], 'policy_pdf', 'NEPRA', 0)
+            ]
+            chunks = [dict(source_file=name, page=page, text=text, source_kind=kind,
+                authority=authority, chunk_id=str(i), char_start=start, char_end=start+len(text))
+                for i, (name, page, text, vector, kind, authority, start) in enumerate(rows)]
+            vectors = np.array([row[3] for row in rows], dtype='float32')
+            faiss.normalize_L2(vectors)
+            index = faiss.IndexFlatIP(3)
+            index.add(vectors)
+            faiss.write_index(index, str(folder/'index.faiss'))
+            (folder/'chunks.json').write_text(json.dumps(chunks))
+            manifest = {'dimensions': 3, 'embedding_model': 'synthetic', 'sha256': {
+                name: hashlib.sha256((folder/name).read_bytes()).hexdigest()
+                for name in ('index.faiss', 'chunks.json')}}
+            (folder/'manifest.json').write_text(json.dumps(manifest))
+            with patch('rag.embed_texts', return_value=np.array([[1, 0, 0], [1, 0, 0], [1, 0, 0],
+                        [0, 1, 0], [0, 0, 1]], dtype='float32')) as embed:
+                hits = rag.search_index('Television drama religious content', authority=['PEMRA'], directory=folder)
+            self.assertEqual(len(embed.call_args.args[0]), 5)
+
+            routes = [hit for hit in hits if hit['retrieval_purpose'] == 'procedure']
+            self.assertEqual({hit['source_file'] for hit in routes}, {'PEMRA_COC.pdf', 'PEMRA_Ordinance.pdf'})
+            self.assertTrue(any(hit['source_file'] == 'PEMRA_Code.pdf' for hit in hits))
+            self.assertTrue(all(hit['authority'] == 'PEMRA' for hit in hits))
+            self.assertEqual(len({(hit['source_file'], hit['page']) for hit in hits}), len(hits))
+            coc = next(hit for hit in hits if hit['source_file'] == 'PEMRA_COC.pdf')
+            self.assertIn('may lodge a complaint before the Council', coc['text'])
+            self.assertEqual(coc['context_chunk_ids'], ['1', '2'])
+            self.assertLessEqual(len(hits), 5)
+            with patch('rag.embed_texts', side_effect=RuntimeError('Synthetic model download failure')):
+                fallback = rag.search_index('Television drama religious content', authority=['PEMRA'], directory=folder)
+            self.assertTrue(fallback)
+            self.assertTrue(all(hit['retrieval_method'] == 'keyword_fallback' for hit in fallback))
+            self.assertTrue(any('may lodge a complaint' in hit['text'] for hit in fallback))
+
+    def test_values_objection_retrieves_general_principles_in_keyword_fallback(self):
+        with patch('rag.embed_texts', side_effect=RuntimeError('Synthetic unavailable model')):
+            hits = rag.search_index('A television drama conflicts with Islamic and cultural values; please review the content.', authority=['PEMRA'])
+        primary = [hit for hit in hits if hit['source_kind'] == 'policy_pdf']
+        self.assertTrue(any('may lodge a complaint' in hit['text'].lower() for hit in primary))
+        self.assertTrue(any('is against the Islamic values' in hit['text'] for hit in primary))
+        self.assertTrue(any('cultural' in hit['text'].lower() for hit in primary))
+
 if __name__=='__main__': unittest.main()
