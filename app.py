@@ -303,6 +303,10 @@ class GroqLLM(BaseLLM):
         super().__init__(model=model, temperature=0.2)
         self.client = Groq(api_key=api_key, timeout=45, max_retries=0)
         self.calls = 0
+        self.requests = 0
+        self.quota_headers = {}
+        self.quota_observed_at = 0.0
+        self.total_quota_wait = 0.0
         self.max_completion_tokens = max_completion_tokens
         self.max_attempts = max(1, min(3, max_attempts))
         self.last_issue = None
@@ -340,18 +344,67 @@ class GroqLLM(BaseLLM):
             clean.append({"role": role, "content": content})
         return clean
 
+    def observe_quota(self, headers) -> None:
+        """Keep only numeric quota headers, never response bodies or keys."""
+        quota = {}
+        for field in ('limit', 'remaining'):
+            value = headers.get(f'x-ratelimit-{field}-tokens', '')
+            if re.fullmatch(r'\d{1,11}', str(value)):
+                quota[field] = int(value)
+        reset = duration_seconds(headers.get('x-ratelimit-reset-tokens', ''))
+        if reset is not None:
+            quota['reset'] = reset
+        self.quota_headers = quota
+        self.quota_observed_at = time.monotonic()
+
+    def quota_pause(self, seconds: float) -> None:
+        """Show a countdown while retaining the current agent request."""
+        if seconds <= 0:
+            return
+        if seconds > 60 or self.total_quota_wait + seconds > 180:
+            raise self.failure('GROQ_RATE_LIMIT')
+        self.total_quota_wait += seconds
+        notice = st.empty()
+        remaining = seconds
+        try:
+            while remaining > 0:
+                notice.info(f'Groq token allowance is recovering. Continuing the same request in about {math.ceil(remaining)} seconds. Your case ID and draft are retained.')
+                interval = min(10.0, remaining)
+                time.sleep(interval)
+                remaining -= interval
+        finally:
+            notice.empty()
+
     def call(self, messages, tools=None, callbacks=None, available_functions=None, **kwargs) -> str:
         messages = self.prepare_messages(messages)
+        if self.calls >= 8:
+            raise self.failure('AI_CALL_BUDGET')
+        self.calls += 1  # Logical agent requests; quota retries resume this request.
         rate_waited = 0.0
-        for attempt in range(self.max_attempts):
-            if self.calls >= 8:
+        quota_retries = 0
+        attempt = 0
+        while attempt < self.max_attempts:
+            if self.requests >= 16:
                 raise self.failure("AI_CALL_BUDGET")
-            self.calls += 1  # Count retries as API requests too.
+            # This is a conservative character estimate, not a tokenizer.
+            # Exact Groq limits and Retry-After remain authoritative.
+            estimated = sum(len(item['content']) for item in messages) // 3 + self.max_completion_tokens + 256
+            quota = self.quota_headers
+            reset_left = quota.get('reset', 0) - (time.monotonic() - self.quota_observed_at)
+            if quota.get('remaining', estimated) < estimated and reset_left > 0:
+                wait = reset_left + 1
+                if rate_waited + wait > 60:
+                    raise self.failure('GROQ_RATE_LIMIT')
+                self.quota_pause(wait)
+                rate_waited += wait
+            self.requests += 1  # Bound all actual HTTP attempts, including 429s.
             try:
                 extra = {'reasoning_effort': 'low'} if 'gpt-oss' in self.model else {}
-                response = self.client.chat.completions.create(
+                raw = self.client.chat.completions.with_raw_response.create(
                     model=self.model, messages=messages, temperature=0.2,
                     max_completion_tokens=self.max_completion_tokens, **extra)
+                self.observe_quota(raw.headers)
+                response = raw.parse()
                 if not response.choices:
                     raise self.failure("GROQ_EMPTY_RESPONSE")
                 content = response.choices[0].message.content
@@ -362,31 +415,33 @@ class GroqLLM(BaseLLM):
                 return content
             except RateLimitError as exc:
                 self.last_rate_limit = groq_rate_limit_info(exc)
-                if request_exceeds_allowance(self.last_rate_limit) or self.last_rate_limit.get("kind") in ("RPD", "TPD"):
+                if request_exceeds_allowance(self.last_rate_limit) or self.last_rate_limit.get("kind") not in ("RPM", "TPM", "ITPM", "OTPM"):
                     raise self.failure("GROQ_RATE_LIMIT") from None
-                if attempt == self.max_attempts - 1:
+                if quota_retries >= 2:
                     raise self.failure("GROQ_RATE_LIMIT") from None
                 wait = self.last_rate_limit.get("retry_after_seconds")
                 if wait is None:
-                    wait = 2 ** (attempt + 1)
-                wait = max(1, wait)
-                # A temporary TPM limit can recover in 35-60 seconds. Keep
-                # the same agent request rather than restarting the crew.
-                # Bound total quota waiting for each call to one minute.
+                    wait = self.last_rate_limit.get('reset_tokens_seconds', 15)
+                wait = max(1, wait) + 1
                 if rate_waited + wait > 60:
                     raise self.failure("GROQ_RATE_LIMIT") from None
                 rate_waited += wait
-                time.sleep(wait)
+                quota_retries += 1
+                self.quota_headers = {}  # Retry-After governs this rejected request.
+                self.quota_pause(wait)
+                continue
             except APIConnectionError:
                 if attempt == self.max_attempts - 1:
                     raise self.failure("GROQ_CONNECTION_ERROR") from None
                 time.sleep(2 ** attempt)
+                attempt += 1
             except APIStatusError as exc:
                 status = exc.status_code
                 if status == 429:
                     self.last_rate_limit = groq_rate_limit_info(exc)
                 if status >= 500 and attempt < self.max_attempts - 1:
                     time.sleep(2 ** attempt)
+                    attempt += 1
                     continue
                 body = exc.body if isinstance(exc.body, dict) else {}
                 api_error = body.get("error", body)
